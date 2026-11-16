@@ -1,0 +1,15 @@
+{
+  "name": "backbone",
+  "owner": {
+    "name": "Calon Analytics"
+  },
+  "description": "The Backbone plugin for Claude Code, from Calon Analytics.",
+  "plugins": [
+    {
+      "name": "backbone-plugin",
+      "source": "./",
+      "description": "Backbone agent-driven tenant setup: skills and slash commands that drive configure-to-build through the Backbone MCP server (the hosted service).",
+      "version": "0.3.0"
+    }
+  ]
+}
