@@ -328,15 +328,17 @@ Calon"*.
    `<TID>` is the tenant id in upper case:
 
    ```
-   uvx --from <CLI source> backbone connect --tenant <tid> \
+   backbone connect --tenant <tid> \
      --key <path to key file> --account <account> --user <TID>_SVC \
      --warehouse <TID>_WH --role <TID>_DEV_LOADER \
      --database <source database> --dev-database <TID>_DEV
    ```
 
-   - `<CLI source>` comes from Calon's instructions, and nothing in Backbone supplies
-     it. If you don't have it, ask the operator; if they don't either, say to ask Calon.
-     Never guess one. It is a checkout's `backbone-cli` folder, or a git URL of the form
+   - `backbone` is the Backbone command line the operator installed for signing in
+     (`uv tool install <CLI source>`, README step 2). `<CLI source>` comes from Calon's
+     instructions, and nothing in Backbone supplies it. If you don't have it, ask the
+     operator; if they don't either, say to ask Calon. Never guess one. It is a
+     checkout's `backbone-cli` folder, or a git URL of the form
      `git+https://<host>/<repo>.git@<ref>#subdirectory=backbone-cli`.
    - `<account>` is the Snowflake account as `<org>-<account>`, or
      `<account>.<region>.<cloud>`; a `.snowflakecomputing.com` ending is accepted.
@@ -344,30 +346,16 @@ Calon"*.
 
    The command runs in the operator's **own terminal**. There is no flag for a token or
    a passphrase, and the default destination is the hosted Backbone. The command prompts
-   for a passphrase (or reads `BACKBONE_KEY_PASSPHRASE`). Tell the operator to set the
-   token first, in that terminal:
+   for a passphrase (or reads `BACKBONE_KEY_PASSPHRASE`). It uses the operator's
+   `backbone login` sign-in, so there is no token step. If it says the operator is not
+   signed in, tell them to run `backbone login` in that terminal first: a browser opens,
+   they sign in and click Continue.
 
-   macOS / Linux: `set -a; read -rs BACKBONE_TOKEN; set +a`
+   `BACKBONE_TOKEN` is for machines only and overrides the sign-in. Putting a token into
+   a Claude session's environment is not recommended, so do not suggest it.
 
-   Windows PowerShell:
-
-   ```
-   $t = Read-Host -AsSecureString "Backbone token"
-   $env:BACKBONE_TOKEN = [System.Net.NetworkCredential]::new("", $t).Password
-   ```
-
-   Tell them too:
-
-   - On macOS / Linux `read -rs` shows no prompt and no characters: paste the token and
-     press Return.
-   - Don't start Claude from that terminal.
-   - Afterwards clear it: `unset BACKBONE_TOKEN`, or in PowerShell
-     `Remove-Item Env:BACKBONE_TOKEN`.
-
-   Running the command with `!` in this session works only if the key has no passphrase
-   and the token is already in the session's environment, because a `!` line has no
-   prompt. Putting the token into a Claude session's environment is not recommended, so
-   do not suggest it.
+   Running the command with `!` in this session works only if the key has no passphrase,
+   because a `!` line has no prompt.
 
    The command prints only `connected` or the error.
 3. When the operator says it finished, call `backbone_connection_status` and

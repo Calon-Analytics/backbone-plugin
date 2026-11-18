@@ -1011,8 +1011,9 @@ else in the block changes:
 - **Hosted refusals** are told in plain words, never as a stack trace or a raw
   payload:
   - `mcp_backend_http_error` → *"The hosted Backbone refused the request
-    (`<status>`). Your access token may be wrong or revoked: ask Calon for a
-    new token."* Show the finding's detail.
+    (`<status>`). You may not be signed in, or your sign-in has expired or been
+    revoked: run `backbone login` in your own terminal, then reconnect the
+    Backbone server with `/mcp`."* Show the finding's detail.
   - `tenant_list_failed` → *"The hosted Backbone could not list its tenants, so
     `<tid>` cannot be confirmed. Try again; if it persists, tell Calon."*
 - Never ask for, print, store or pass on the Backbone token: the plugin sends

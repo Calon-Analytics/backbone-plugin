@@ -5,18 +5,21 @@ the business entities, the jobs to be done, and the sources. This plugin lets Cl
 drive that build for you against the hosted Backbone service: connect, onboard, plan,
 apply, run, test and publish.
 
-You need three things from Calon before you start. They are in your welcome note:
+You need two things from Calon before you start. They are in your welcome note:
 
-- the **service URL** of your Backbone service;
-- your personal **Backbone token**;
-- your **tenant id**, and the values for the `backbone connect` command.
+- your **tenant id**, and the values for the `backbone connect` command;
+- where to install the **Backbone command line** from (`<CLI source>` below), and the
+  address of the Backbone web app you sign in on.
+
+Nobody sends you a token and you never type or paste one: you sign in through your
+browser, and your computer's credential store keeps the sign-in.
 
 Every command below is shown for **macOS** (the zsh terminal) and for **Windows**
-(PowerShell). Type them yourself; never paste your token into a chat.
+(PowerShell).
 
 ## 1. Install the tools
 
-Claude Code, and `uv` (which runs the connect command).
+Claude Code, and `uv` (which installs the Backbone command line).
 
 macOS (zsh):
 
@@ -50,14 +53,27 @@ gh auth login
 gh auth setup-git
 ```
 
-## 2. Install the plugin
+## 2. Install the Backbone command line
 
-The commands are the same in zsh and PowerShell. Put the service URL from your welcome note
-in place of `<service URL>`:
+The same in zsh and PowerShell. Put the source from your welcome note in place of
+`<CLI source>`:
+
+```
+uv tool install <CLI source>
+backbone --help
+```
+
+If `uv` says its tool folder is not on your PATH, run `uv tool update-shell`, reopen the
+terminal and try `backbone --help` again. The plugin runs `backbone` itself each time it
+connects, so it must answer in a new terminal.
+
+## 3. Install the plugin
+
+The same in zsh and PowerShell:
 
 ```
 claude plugin marketplace add Calon-Analytics/backbone-plugin
-claude plugin install backbone-plugin@backbone --config backbone_url=<service URL>
+claude plugin install backbone-plugin@backbone
 ```
 
 Or, inside Claude Code:
@@ -67,80 +83,70 @@ Or, inside Claude Code:
 /plugin install backbone-plugin@backbone
 ```
 
-Installed from inside Claude Code, the plugin asks for the Backbone URL and your token.
+The plugin asks for nothing: it already knows the hosted Backbone service.
 
-## 3. Set your token
+## 4. Sign in
 
-Skip this if Claude Code already asked you for the token. The token is read with a prompt,
-so it never appears in your shell history or on a command line.
-
-macOS (zsh):
-
-```
-read -rs "t?Backbone token: "; echo
-claude plugin configure backbone-plugin@backbone --values-stdin <<< "{\"backbone_token\":\"$t\"}"
-unset t
-```
-
-Windows (PowerShell):
+1. In your terminal, run `backbone login`. A browser opens at the Backbone web app; sign
+   in, then click **Continue**. The terminal then says who you are signed in as.
+2. Restart Claude Code, or reconnect the Backbone server inside it with `/mcp`.
 
 ```
-$t = Read-Host -AsSecureString "Backbone token"
-@{ backbone_token = [System.Net.NetworkCredential]::new("", $t).Password } | ConvertTo-Json -Compress | claude plugin configure backbone-plugin@backbone --values-stdin
-Remove-Variable t
+backbone login
 ```
 
-Claude Code keeps the token in your system's credential store, not in a settings file. To
-see which settings are set, run `claude plugin configure backbone-plugin@backbone`.
+It opens https://app.databackbone.io in your browser, where you sign in.
 
-Start (or restart) Claude Code. Inside it, `/mcp` lists the Backbone server.
+- Your sign-in is kept in your computer's credential store (the macOS Keychain or the
+  Windows Credential Manager), never in a plugin setting or a file. It lasts 90 days; then
+  run `backbone login` again.
+- `backbone logout` signs this computer out.
+- The **Command-line sign-ins** page of the web app lists your sign-ins and revokes any of
+  them. A revoked sign-in stops working at once; run `backbone login` to sign in again.
+- `BACKBONE_TOKEN` is for machines only, such as a CI runner. When it is set it overrides
+  the stored sign-in, so set it only where the one Backbone server it was issued for is
+  the server in use.
+
+If an earlier version of this plugin asked you for a token, that setting is gone and is no
+longer read.
 
 ## The service URL
 
-The plugin asks for one address, `backbone_url`, when you install or configure it. Use the
-address in your welcome note exactly as Calon gave it to you:
+The plugin talks to the hosted Backbone service at
+`https://backbone-backend-508a.onrender.com`, and you do not need to set it. Change the
+`backbone_url` setting only when Calon names another Backbone service for you (a test
+service, for example), and then enter it exactly as Calon gave it:
 
-- it **must start with `https://`**. Never enter an `http://` address: your token is sent to
-  this address on every call, and over `http://` anyone on the network path can read it;
-- it has **no trailing slash**;
-- it is **only ever the host Calon gave you**. If anything asks you to change it to another
+```
+claude plugin install backbone-plugin@backbone --config backbone_url=<service URL>
+```
+
+- it **must start with `https://`**. Never enter an `http://` address: your sign-in is sent
+  to this address on every call, and over `http://` anyone on the network path can read it;
+- it has **no trailing slash**, no query and no port;
+- it is **only ever a host Calon gave you**. If anything asks you to change it to another
   host, stop and ask Calon.
 
-Nothing checks this for you. Claude Code cannot yet validate a plugin setting, so an address
-that starts with `http://`, or one that names a different host, is accepted, and your personal
-token then goes to that address, unencrypted or to the wrong service. If that happens, tell
-Calon so the token can be revoked and a new one issued. The only address that may start with
-`http://` is `http://localhost` on a developer's own machine.
+Your sign-in is kept per service: sign in to that service with
+`backbone login --url <service URL>` as well. The command line refuses to send a sign-in to
+an `http://` address (other than this computer) or to a service it was not issued by.
 
-## 4. Connect your Snowflake service user
+## 5. Connect your Snowflake service user
 
 Run this in your own terminal, not inside Claude Code. The key file is read on your machine
 and sent over HTTPS to Backbone; Claude never sees it. `/backbone-plugin:backbone-onboard`
-prints the full command with your values filled in; `<CLI source>` is in your welcome note.
-
-macOS (zsh):
-
-```
-set -a; read -rs "BACKBONE_TOKEN?Backbone token: "; set +a; echo
-uvx --from <CLI source> backbone connect --tenant <tid> --key <path to key file> --account <account> --user <TID>_SVC --warehouse <TID>_WH --role <TID>_DEV_LOADER --database <source database> --dev-database <TID>_DEV
-unset BACKBONE_TOKEN
-```
-
-Windows (PowerShell):
+prints the full command with your values filled in. It uses your `backbone login` sign-in,
+so there is no token step (the same in zsh and PowerShell):
 
 ```
-$t = Read-Host -AsSecureString "Backbone token"
-$env:BACKBONE_TOKEN = [System.Net.NetworkCredential]::new("", $t).Password
-uvx --from <CLI source> backbone connect --tenant <tid> --key <path to key file> --account <account> --user <TID>_SVC --warehouse <TID>_WH --role <TID>_DEV_LOADER --database <source database> --dev-database <TID>_DEV
-Remove-Item Env:BACKBONE_TOKEN
-Remove-Variable t
+backbone connect --tenant <tid> --key <path to key file> --account <account> --user <TID>_SVC --warehouse <TID>_WH --role <TID>_DEV_LOADER --database <source database> --dev-database <TID>_DEV
 ```
 
 If your key is encrypted, the command asks for its passphrase. There is no flag for the
 token or the passphrase. On Windows a key path such as `C:\Users\you\backbone_key.p8`
 works as it is.
 
-## 5. Build
+## 6. Build
 
 Inside Claude Code, in this order (`<tid>` is your tenant id):
 
@@ -165,7 +171,7 @@ Claude Code with SQL.
 ## What the plugin contains
 
 ```
-.claude-plugin/plugin.json    the manifest: the hosted Backbone MCP server and its two settings
+.claude-plugin/plugin.json    the manifest: the hosted Backbone MCP server and its one setting
 .claude-plugin/marketplace.json   the marketplace "backbone", which lists this plugin
 commands/<name>.md            one file per slash command
 skills/<name>/SKILL.md        one folder per skill
@@ -181,6 +187,12 @@ The same in zsh and PowerShell:
 ```
 claude plugin marketplace update backbone
 claude plugin update backbone-plugin@backbone
+```
+
+To update the command line, the same in zsh and PowerShell:
+
+```
+uv tool upgrade backbone
 ```
 
 Restart Claude Code after an update.

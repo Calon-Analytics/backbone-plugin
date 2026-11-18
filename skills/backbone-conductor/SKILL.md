@@ -95,8 +95,9 @@ Call `backbone_get_lifecycle_position(tenant_id=<tid>)`.
 - **The `backbone` MCP connection itself is refused** (hosted only: `/mcp`
   answers HTTP 401 or 503 before any tool runs, so there is no payload) → STOP
   and say it in plain words:
-  - HTTP 401, the token is revoked or not valid: *"Backbone did not accept your
-    token. It has been revoked or is not valid. Ask Calon for a new token."*
+  - HTTP 401, no sign-in reached Backbone, or it is revoked or expired: *"Backbone
+    did not accept your sign-in. Run `backbone login` in your own terminal, then
+    reconnect the Backbone server with `/mcp`."*
   - HTTP 503: *"The service cannot check your token right now; try again
     shortly."*
 
@@ -115,7 +116,7 @@ payload that has one is a failure, and the conductor STOPS:
 | `invalid_response` | Environment problem: something answered at the `endpoint` that is not a Backbone backend position map. Show `status` and `detail`. |
 | `lifecycle_position_http_error` | The backend answered with an error. Show the `status` and the `detail` verbatim. |
 | `tenant_access_denied` | Say in plain words: *"Your Backbone account has no access to tenant `<tid>`. Ask Calon to add you to its organisation."* Never show the payload or a stack trace. |
-| `token_rejected` | Say the backend's message from `detail` in plain words (for example *"token revoked; ask Calon for a new one"*) and stop. Never show the payload or a stack trace. |
+| `token_rejected` | Say the backend's message from `detail` in plain words (for example *"token revoked or expired; run backbone login to sign in again"*) and stop. Never show the payload or a stack trace. |
 | `tenant_id_required` | Print the Step 0 usage line. |
 | anything else (e.g. `internal_error`) | Show the whole payload; do not interpret it. |
 

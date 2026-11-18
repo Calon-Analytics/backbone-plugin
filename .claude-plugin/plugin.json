@@ -1,6 +1,6 @@
 {
   "name": "backbone-plugin",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "author": {
     "name": "Calon Analytics"
   },
@@ -9,24 +9,16 @@
     "backbone_url": {
       "type": "string",
       "title": "Backbone URL",
-      "description": "Base URL of the hosted Backbone service, exactly as Calon gave it to you: it must start with https:// and have no trailing slash. Your token is sent to this address, so never enter an http:// address or any other host.",
-      "required": false
-    },
-    "backbone_token": {
-      "type": "string",
-      "title": "Backbone token",
-      "description": "Your personal Backbone access token, issued by Calon.",
-      "sensitive": true,
-      "required": false
+      "description": "Leave this as it is: it is the hosted Backbone service. Change it only when Calon names another Backbone service for you, and then enter it exactly as given: it must start with https:// and have no trailing slash, query or port. Never enter an http:// address or any other host.",
+      "required": false,
+      "default": "https://backbone-backend-508a.onrender.com"
     }
   },
   "mcpServers": {
     "backbone": {
       "type": "http",
       "url": "${user_config.backbone_url}/mcp",
-      "headers": {
-        "Authorization": "Bearer ${user_config.backbone_token}"
-      }
+      "headersHelper": "backbone auth header --mcp"
     }
   }
 }

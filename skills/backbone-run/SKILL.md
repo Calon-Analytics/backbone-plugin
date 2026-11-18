@@ -35,7 +35,9 @@ to drop and reload, card #1167, or `replay <satellite> [<satellite> …]`, card
 (`hard_rule_drift`) **HR1** or rule-11 (`sat_payload_drift`) **SP1** finding
 named: each re-reads its latest staging row per key and gains a version only
 where the hashdiff changed. With `replay`,
-`reload-seed` is refused. The tenant has already had `/backbone-apply`
+`reload-seed` is refused. Optionally `freeze <YYYY-MM-01>` (BB-1384): freeze the tenant's
+snapshot balances through that period, on DEV only and never with `replay`. On PROD the
+close run freezes by itself; this is how a DEV freeze is proven or redone. The tenant has already had `/backbone-apply`
 run against it, so its build artefacts exist under
 `{estate root}/{tid}/build_control/` and there is (or will be) an
 active dbt repository at `{estate root}/{tid}/`.
@@ -81,7 +83,10 @@ The skill drives two MCP tools (HTTP-only wrappers, card #581):
    `select="<satellites>"` runs ONE `dbt run` of those satellites with the
    replay var set and its results under `target_replay/` (so `target/` keeps the
    last real run), no seeds; the response adds `replay_rows`
-   (`{satellite: {status, rows}}`).
+   (`{satellite: {status, rows}}`). `freeze_period` (BB-1384) is the period the
+   operator named with `freeze`: it is added to `dbt run`'s vars as `backbone_freeze`,
+   so each `snapshot_balance_<product>` writes that period's changed cells. Pass it only
+   when the operator named `freeze`.
 
 Do **NOT** shell out to a raw `dbt run` subprocess. The endpoint owns
 path resolution (working→runtime sync, venv, profiles-dir, `--vars`,
@@ -151,9 +156,14 @@ explicit one-line confirmation** before running:
   1 ms after its high-water mark; history kept; a second replay inserts nothing;
   case- or whitespace-only changes are not picked up"*.
 
+- **Freeze** (only when the operator named `freeze`, BB-1384) — say: *"freezes the
+  snapshot balances through `<period>`: every cell that changed since the last freeze is
+  written once and never updated; a frozen period cannot be unfrozen from here; a
+  period not yet ended is refused and one already frozen writes nothing"*.
+
 Then ask, plainly: *"This will run `dbt seed` + `dbt run` against the DEV
 Snowflake schema for `{tid}` (DML). Reply `run` to proceed, anything
-else to abort."* With `replay`, ask instead: *"This will replay `<satellites>`
+else to abort."* With `freeze`, add *"and freeze snapshot balances through `<period>`"*. With `replay`, ask instead: *"This will replay `<satellites>`
 against DEV (DML). Reply `run` to proceed."*
 
 - Operator replies `run` (or an equally explicit yes) → proceed.
