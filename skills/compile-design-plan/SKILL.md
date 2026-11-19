@@ -43,10 +43,12 @@ configuration, not separately.
 | Outputs | — | `{estate root}/{tid}/configs/design_plan.md`; on operator confirmation only, step 3.5's source and loader registrations (#971) |
 
 The plan file is markdown with an embedded YAML block. Prose brief on
-top, structured YAML beneath. Write with `path.open("w")` — never
-`open(path, "w")` (CLAUDE.md constraint #4).
+top, structured YAML beneath. Save it **only** with `PUT design-plan`
+(`PUT /api/config/{tid}/design-plan`, or `backbone_put_design_plan` on hosted;
+step 7), never with a file write: a plan written past the store has no plan
+record and apply refuses it (`plan_written_by_plan_store`).
 
-## Plan format (v1.17)
+## Plan format (v1.19)
 
 ```yaml
 entities:
@@ -57,15 +59,14 @@ entities:
         tables: [PRODUCT_VARIANT, PRODUCT]  # closed binding (B4)
         primary: PRODUCT             # v1.1 — required when tables > 1 (B8)
         bk: SKU                              # per-binding override (B6)
-        unverified:                          # v1.5 — this binding could not be fully checked
-          - reason: [table_never_examined]   # closed set; a LIST — several can hold at once
-            note: >
-              PRODUCT_VARIANT wasn't in the source scan, so its column
-              references are unchecked. Confirmed when the plan is applied.
       - name: WAREHOUSE
         tables: [ORDER]
         bk: ORDERNUMBER
         filter: "type = 'ABC'"  # v1.1 — per binding (B9)
+        metadata:                            # v1.18 — amount / date tags (BB-1419)
+          TOTAL_PRICE_SET: amt               # a VARIANT the plan-time profile reads as money
+          LASTUPDATEDBY: none                # the name rule would tag it dt; it holds a user id
+        include_columns: [PAYMENT_REF]       # v1.18 — a scanned column the ledger lacks (BB-1419)
         transforms:                          # field-level hard rules (B16, #624)
           - as: ORDERNUMBER                  # output == an existing scanned col → OVERRIDE
             expr: "'P' || ORDERNUMBER"       # raw SQL, landing-layer, grain-preserving
@@ -89,6 +90,11 @@ entities:
         foreign_keys:                        # this line references other entities (B10)
           - column: ORDER_ID
             target: salesorder               # FK folds into the salesorder hub/link
+          - column: WAREHOUSE_REF            # a prejoin: the line holds a surrogate
+            target: party
+            fk_to_table: WAREHOUSE_ACCOUNT   # the table the surrogate points into
+            fk_to_column: ACCOUNT_REF        # v1.18 — REQUIRED on every prejoin: the
+                                             # target column it joins to (B10)
           - column: SKU
             target: product                  # FK folds into the product hub/link
         dck: LINE_ID                         # v1.9 — the dependent child key (#959).
@@ -117,9 +123,13 @@ entities:
       - name: ECOMMERCE
         tables: [CUSTOMER]
         bk: CUSTOMER_ID
+        excluded_columns: [EMAIL, DELIVERY_NOTES]  # v1.19 — enter NO satellite (B22,
+                                           # BB-1073). Staging still reads them, so a
+                                           # key hashed from one still works
       - name: WAREHOUSE
         tables: [ACCOUNT]                  # two sources key `party` — B19 asks about it
-        bk: ACCOUNT_CODE
+        bk: [REGION, ACCOUNT_CODE]         # v1.18 — a composite key: a LIST, in the
+                                           # order its columns are hashed
   - slug: customer
     core_ref: Party
     role: customer                   # role on Party — never hub_customer
@@ -186,6 +196,46 @@ Field semantics (per CONTEXT.md → "Source binding"):
   #556 inference survives only as a planning-time *suggestion*. Omit only
   on uow-line bindings (those that carry `foreign_keys:` — they declare
   FKs, not a BK, #578) and on open bindings (no `tables:`).
+  **v1.18:** a composite key is a **list**, `bk: [COL_A, COL_B]`, in the
+  order its columns are hashed. The order is the plan's (ADR-0053): apply
+  writes the ledger's key columns in it and nothing reads it from a profile or
+  the mapping cache. Re-ordering a live key re-keys the hub (every hash key
+  changes), so treat it as a key change.
+- `foreign_keys[].fk_to_column` — **v1.18.** Required on every **prejoin**
+  (an entry with `fk_to_table`): the column of `fk_to_table` the line's
+  surrogate joins to. Filled from the relationship scan's edge, or measured
+  with a free query and confirmed by the operator (B10). The plan-contract
+  check (rule 2, `prejoin_join_resolvable`) judges it against the target's scan
+  columns and key-eligible types; a prejoin without one is blocking. An `x`
+  direct key (no `fk_to_table`) carries neither.
+- `sources[].metadata` — **v1.18 (BB-1419).** Optional mapping
+  `{COLUMN: amt | dt | none}`: the column's amount / date tag, which suffixes
+  the built column (`…_amt` / `…_dt`). The stamp reads only the ledger and the
+  scan (ADR-0053), so a tag the name and type rule would not give (a money
+  amount held in a VARIANT, a date held as text) is stated here; `none` states
+  no tag where the rule would give one. Write only the deviations: a column
+  the rule already tags correctly needs no entry. Each column must exist on the
+  binding (scan columns, plus `transforms[].as`) and each value must be exactly
+  `amt`, `dt` or `none`, both blocking (`column_exists`, `stated_column_shape`).
+  A stated tag never replaces a key's `bk` / `rk`, nor a loader timestamp's
+  `tk` (an entry on a `bk` or foreign-key column is advisory,
+  `stated_tag_on_key`: remove it). Not on an open binding. Apply compiles the
+  whole mapping onto the ledger, replace-by-scope (step 5f), so deleting an entry
+  takes the tag off. A column the mapping names that the ledger does not hold yet
+  is brought in by apply step 4f, like every column the plan names. Changing a
+  live column's tag renames the built column, so treat it like a schema change.
+- `sources[].include_columns` — **v1.18 (BB-1419).** Optional list of scanned
+  columns the binding's ledger does not hold yet, which the plan brings into the
+  vault. Once a binding has a ledger, a column the source lands later is not
+  stamped into the body by itself: apply reports it as `new_source_columns`
+  (apply step 9), and plan decides, here, whether it joins. Each column must
+  exist in the scan (`column_exists`, blocking; a `transforms[].as` column is
+  derived, not included). Not on an open or a flatten-fed binding
+  (`stated_column_shape`). A first-time binding needs none: its ledger takes
+  every scanned column. Any column another key names (`bk`, a foreign key, a
+  condition, a reference, `metadata:`) is brought in without it (apply step 4f).
+  Removing a name never removes the column: a column leaves the vault only
+  through `excluded_columns:` (BB-1073, v1.19).
 - `sources[].filter` — **v1.1.** Optional WHERE clause (double-quoted
   scalar) applied to the landing view for this `(source, table)`. Must
   reference columns that exist on the named table — verified during the
@@ -555,36 +605,41 @@ Field semantics (per CONTEXT.md → "Source binding"):
     (step 4.8): `compile-ok <date> · <n> rows · sample <val>`. Authored by
     the skill after a successful probe, not by the operator.
 
-    An entry with **no `tested:` stamp** is not undefined and is not an error: it
-    means the live compile-test did not run, and the binding MUST then carry
-    `unverified: warehouse_unreachable`. A `transforms:` entry with neither a
-    stamp nor that annotation is a contract violation.
-- `sources[].unverified` — **v1.5.** Optional list of
-  unverified-value annotations
-  (ADR-0030). Each
-  entry records that a check some gate specifies for this binding **could not
-  be completed at plan time**, and carries a deferred obligation apply must
-  settle. Two fields, and only two:
-  - `reason` — a **list** drawn from the closed set
-    `table_never_examined` / `guessed_load_method` /
-    `contents_never_examined` / `warehouse_unreachable`. A list, because a
-    cold-start tenant with no warehouse carries the first and the last at once
-    and they cover different checks. **A cause outside the four is a defect to
-    card, not a fifth reason to invent.**
-  - `note` — the operator's sentence. This is the **only** free text in the
-    feature, and it is not free-form: it is the reason's **canonical sentence**
-    (defined once in `app/utils/unverified_value.py`), with the binding's
-    `SOURCE.TABLE` substituted and the settlement point appended. Quote it;
-    never paraphrase it.
-
-  **Scope follows the missing evidence source, not the binding**
-  (CONTEXT.md → Unverified-value reasons):
-  a table absent from the scan can still have had its business key live-probed,
-  and those stay two independent facts. **Absence of the block is a positive
-  claim** — a binding with no `unverified:` was fully confirmed at plan time,
-  which is what obliges B13/B15/B16/B17 to write one whenever they cannot
-  confirm. Nothing else on the binding changes shape: no new field on `bk:`,
-  `foreign_keys:`, `metadata_overrides:` or `transforms:`.
+    Every stored entry carries a `tested:` stamp: the live compile-test runs
+    before the entry is written, and a plan that cannot run it stores nothing
+    (see "Plan checks the warehouse itself", rule 4).
+- `sources[].unverified` — **retired in v1.18** (ADR-0049 supersedes ADR-0030).
+  Plan writes no `unverified:` block: anything it cannot confirm is a Gap resolved
+  with the operator, or a data-readiness gap that keeps the table out. The
+  plan-contract check refuses a plan carrying one (`plan_carries_unverified`,
+  blocking: re-plan), so a plan written before v1.18 is re-planned (step 8,
+  "Cutover re-plan").
+- `sources[].excluded_columns` — **v1.19.** Optional. A non-empty list of
+  UPPERCASE physical columns of the bound table that enter **no satellite**:
+  not the payload, not the hashdiff (BB-1073). Staging still reads each one, so a
+  business key or a foreign key's source column hashed from it still works; the
+  satellite payload drops its business-key copy, so the business vault loses
+  `bk__<col>` for that binding. The exclusion is per binding: another binding on
+  the same table that does not list the column still carries it. The use is a
+  data standard of bringing personal data in only where it is needed: a free-text
+  note, a JSON blob that can carry a customer's own words. Apply writes each
+  attribute to the ledger as `target: __excluded__` (a key column keeps its
+  target and gets `excluded: true`) and re-derives that from the plan on every
+  apply (step 5g), so the declaration survives every re-apply; a column dropped
+  from the list goes back into the satellite. Not the same as `metadata_columns`, which keeps a
+  column in the payload and only leaves it out of the hashdiff. The plan-contract
+  check refuses (blocking) a column the table does not have (judged against its
+  scan columns plus `transforms[].as`), a column listed twice, a column also
+  listed under `metadata_overrides.metadata_columns`, a column also listed under
+  v1.18's `include_columns:`, a column the binding's load timestamp or batch id
+  expression reads (`ldts`, `etl_runid`; its value lands in every satellite's
+  load-stamp column), a column named `LDTS` or `RSRC` (a satellite system column),
+  and the key on an open or a flatten-fed binding (`excluded_columns_valid`). A
+  column also tagged under v1.18's `metadata:` is an advisory
+  (`excluded_column_stated_metadata`): the tag has no effect while the column is
+  excluded, and comes back with it on a release. Exclusion is the only form: a
+  plan never routes a column into a separate personal-data satellite. Authored
+  by B22 (step 5.11).
 - `sources[].deletes` — **v1.17.** Optional. How a record **deleted at
   source** is detected for this binding (kanban #1202, authored by B21, step 5.10).
   The vault never deletes: a detected delete is a new row in the binding's own
@@ -911,6 +966,89 @@ adopted with a `core_ref` like any other entry — no inline definition:
 - slug: widget
   core_ref: widget          # authored on the design surface, then adopted
 ```
+
+## Plan checks the warehouse itself (ADR-0049, ADR-0053, BB-1354)
+
+Plan does every read of the warehouse a decision depends on; apply reads no
+data. These rules govern every step and dialogue behaviour below. Where an
+older passage says otherwise, this section wins.
+
+1. **Free read-only queries.** Every live check is a read-only
+   `snowflake_query` (`SELECT` / `WITH` only; the tool enforces a row cap and a
+   timeout). **On hosted:** `snowflake_query` is served too, with the same
+   guards, a 500-row ceiling and a 50-second timeout, and it runs as you; apply
+   step 0's hosted SQL review to every statement. There is no narrow endpoint
+   per check.
+2. **Plan binds only scanned tables** (ADR-0049 decision 4). A table missing
+   from the source scan is not bound: a cell that needs one is a Gap, closed by
+   re-scanning the source and planning the table once it is scanned, or by
+   leaving the cell unbound.
+3. **Load timestamps are checked live**, on the planned table and expression,
+   never from ledgers:
+
+   ```sql
+   SELECT COUNT(*) AS ROWS_TOTAL,
+          COUNT_IF((<ldts expression>) IS NULL) AS ROWS_NULL
+   FROM <SCHEMA>.<TABLE>
+   ```
+
+   `ROWS_TOTAL = 0` is not a finding: an unlanded table is the normal case for a
+   new source. `ROWS_NULL = ROWS_TOTAL > 0` (NULL in every row) is a
+   **data-readiness gap**: the table stays out of the plan and goes back to
+   ingestion. The expression is judged as written (`coalesce(A, B)` is NULL only
+   when both arms are). The same check covers `etl_runid`; never `smdt`.
+4. **All or nothing.** If the warehouse cannot be reached at any point in a
+   session (a connection error or a timeout, as distinct from SQL the warehouse
+   answered with an error), stop and store nothing: the plan on disk and its
+   record are unchanged. Name the check that could not run and ask the operator
+   to re-run `/backbone-plan` once the warehouse answers.
+5. **No `unverified:` blocks.** Plan writes none. What it cannot confirm is a
+   Gap resolved with the operator, or a data-readiness gap that keeps the table
+   out. The plan-contract check refuses a plan carrying one
+   (`plan_carries_unverified`, blocking: re-plan), and `PUT design-plan` refuses
+   to store it.
+6. **Every prejoin states `fk_to_column` (v1.18).** For each `foreign_keys[]`
+   entry with `fk_to_table`, take the relationship scan's edge for
+   `(table, column)` when it points at `fk_to_table`. Otherwise measure the
+   candidate on the target with a free query and put the figures to the
+   operator:
+
+   ```sql
+   SELECT COUNT(*) AS CHILD_ROWS, COUNT_IF(t.<CANDIDATE> IS NULL) AS UNMATCHED
+   FROM <SCHEMA>.<TABLE> c
+   LEFT JOIN <SCHEMA>.<FK_TO_TABLE> t ON c.<COLUMN> = t.<CANDIDATE>
+   WHERE c.<COLUMN> IS NOT NULL
+   ```
+
+   with the target's uniqueness (`COUNT(*)` against
+   `COUNT(DISTINCT <CANDIDATE>)`). Only a column the operator confirms is
+   written. Contract rule 2 judges the stated column against the target's scan
+   columns and key-eligible types; a prejoin without one is blocking.
+7. **Business-key order is the plan's.** A composite business key is a `bk:`
+   list (v1.18), in the order its columns are hashed. Nothing on the plan,
+   apply or build path reads the order from a profile or the mapping cache.
+8. **Every planned source has a loader.** Rule 8 (`source_has_loader_binding`)
+   is blocking; step 3.5 does not let a source go without one (its L row,
+   `POST /api/config/{tid}/loaders`).
+9. **Saved only through the plan store.** On a local estate as on hosted, the
+   plan is saved with `PUT design-plan` (step 7). The store judges it, starts it
+   with the "generated; don't edit by hand" banner, and writes the plan record
+   `configs/design_plan.checked.yaml` in the same commit. Never write
+   `design_plan.md` directly: apply refuses a plan with no record, or whose
+   `## Plan` fingerprint differs from the record's (`plan_written_by_plan_store`,
+   no override).
+10. **Amount / date tags are measured at plan time (BB-1419).** For each
+    closed binding the plan writes or changes, profile its table once, live and
+    uncached: `backbone_profile_table(tenant_id, schema_name, table_name,
+    persist=false)` (local estate: `POST $BACKBONE/api/tenants/{tid}/mcp/profile-table`).
+    It writes no profile cache, no mapping cache and no ledger; read the result
+    in this session only. Where its `inferred_semantic_type` reads a column as a money
+    amount or a date and the name and type rule (the stamp's) would not tag it
+    so, or where the rule would tag a column the profile shows is neither, put
+    the column to the operator with the sample values and write the confirmed
+    entry under the binding's `metadata:` (`amt`, `dt` or `none`). Only
+    deviations are written. Never use the cached profile route for this, and
+    never profile at apply.
 
 ## Steps
 
@@ -1381,7 +1519,7 @@ action — B1/B4 own it in the walk.
 |---|---|---|---|
 | S1 | schema not registered | `ECOMMERCE` | `PUT /api/config/{tid}/sources/ECOMMERCE` with `{"schemas": ["ECOMMERCE"]}` |
 | L1 | source has no loader | `ECOMMERCE` — fingerprint `_DLT_LOAD_ID` ⇒ `dlt` | `POST /api/config/{tid}/loaders` with `{"loader": "dlt", "schemas": ["ECOMMERCE"]}` |
-| L2 | source has no loader | `WAREHOUSE` — no fingerprint | none — name a loader from `loader_metadata.yaml`, or leave it unbound: rule 8 reports it, B15 floors it |
+| L2 | source has no loader | `WAREHOUSE` — no fingerprint | none — the operator names a loader from `loader_metadata.yaml`; rule 8 refuses a source without one (blocking since BB-1354) |
 | T1 | source has no time zone | `ECOMMERCE` — the brief says the store reports in New York time | in S1's PUT: `{"schemas": ["ECOMMERCE"], "time_zone": "America/New_York"}` |
 | T2 | source has no time zone | `WAREHOUSE` — nothing names one | none — **leave undeclared** (the default), or name an IANA zone |
 | C1 | concept not found | `warranty` | the operator runs step 4.2's authoring curl against `$BACKBONE` |
@@ -1439,7 +1577,10 @@ explicit operator confirmation **in this turn**:
   zone), then `register`. A T row answered **leave undeclared** writes nothing.
 - `skip` — continue the plan without registering. Nothing is written — no
   zone either, so the tenant's SQL stays byte-identical. Step 6's bulk preview
-  lists the rows still open under *"apply will stop on / report"*.
+  lists the rows still open under *"apply will stop on / report"*. **An L row
+  cannot be skipped** (ADR-0049, BB-1354): every planned source has a loader,
+  and rule 8 refuses one without. A source whose loader cannot be named is not
+  planned until it has one.
 - `re-check` — after the operator authors a C-row concept, re-resolve only the
   C rows.
 
@@ -1595,9 +1736,8 @@ Run it as a distinct stage **after** relationship-scan surfacing (4.6) and
 
 ### 4.8 Field-level hard-rule resolution + live compile-test (#624)
 
-**On hosted:** the live compile-test is skipped (no warehouse query tool is
-served on hosted); B16 says how each skipped test is recorded as advisory
-unverified.
+**On hosted:** the live compile-test runs through `snowflake_query`, as B16
+says.
 
 The brief sometimes states that a source stores a business key in a
 **different representation** than the hub it must integrate onto — *"one
@@ -1716,13 +1856,8 @@ NULL or empty, and the keys of a few elements — and propose `elements[]`
 (`path`, `as`, `cast`) from what the sample holds. Never guess a path the sample
 does not show.
 
-**On hosted:** the sample is skipped (no warehouse query tool is served on
-hosted). Ask the operator for the element paths, the NULL-or-empty count and the
-element id, which they read in their own warehouse; never guess one. Record each
-binding the flatten feeds as **advisory unverified**, `unverified: [{reason:
-[warehouse_unreachable], note: <its canonical sentence>}]`, listed as an
-advisory line in the step-6 preview; the first build or run proves it. The
-flatten's filter is SQL text: apply step 0's SQL text rule.
+**On hosted:** the sample runs through `snowflake_query`, as on a local estate.
+The flatten's filter is SQL text: apply step 0's SQL text rule.
 
 Then ask **only what the system cannot infer** — five questions, one at a time:
 
@@ -1796,8 +1931,8 @@ their own `reconciled_by`.
 first build, so B17 (BK quality) and B20 (collapse) probe the flattened rows
 with the same `LATERAL FLATTEN` the declaration renders, run ad hoc
 (`SELECT … FROM <TABLE> src, LATERAL FLATTEN(input => src.<COLUMN>) f`). When
-the warehouse is unreachable the binding carries
-`unverified: [warehouse_unreachable]`, as any other.
+the warehouse is unreachable, nothing is stored ("Plan checks the warehouse
+itself", rule 4).
 
 ### 5.8 Attaching-binding declaration — a table with the owner's key, not its participants (#996)
 
@@ -1913,6 +2048,11 @@ the reference exists.
 For every closed binding, run **B21** and record the answer as `sources[].deletes`.
 Automate first, the operator confirms; nothing here is invented.
 
+### 5.11 Excluded columns — what enters no satellite (BB-1073)
+
+For every closed binding, run **B22** and record the answer as
+`sources[].excluded_columns`. Most bindings exclude nothing and carry no key.
+
 ### 6. Bulk preview and confirmation
 
 **On hosted:** the preview also lists every SQL value of the draft, one row
@@ -2022,21 +2162,16 @@ summary of:
   *"these columns leave the satellite hashdiff and stay in the satellite
   payload, so the satellite stops re-versioning on an unchanged re-land;
   a binding already covered by its loader profile needs no entry"*.
-- count of bindings carrying an `unverified:` block
-  (ADR-0030), broken
-  out by reason, and a note: *"absence of the mark is a positive claim — every
-  other binding was fully checked at plan time."* Name each binding and quote
-  its `note` verbatim; do not paraphrase and do not summarise several bindings
-  into one sentence. Say where each is settled — `table_never_examined`,
-  `guessed_load_method` and `contents_never_examined` at apply;
-  `warehouse_unreachable` by re-planning once the warehouse is reachable, or at
-  apply. **None of them blocks the plan**, and the preview says so, so an
-  operator is never left guessing whether they have to act now:
-
-  > **2 bindings could not be fully checked.**
-  > `ECOMMERCE.PRODUCT_VARIANT` — wasn't in the source scan, so its column references are unchecked (`table_never_examined`).
-  > `GENERIC.ORDER_LINE` — load timestamps are a guess; we couldn't tell which tool loads this schema (`guessed_load_method`).
-  > Both are settled when you run apply. Nothing here blocks the plan.
+- count of bindings carrying `excluded_columns` (BB-1073, v1.19). Name each
+  binding and the columns it excludes, with the note: *"these columns enter no
+  satellite; a key hashed from one still works"*. When the plan-contract check
+  returns `excluded_column_leaves_satellite` for one, quote its message verbatim:
+  that satellite carries the column today, so its hashdiff changes and it needs a
+  full refresh, which loses its history where the landing keeps only current rows.
+- count of prejoins and the `fk_to_column` each states (v1.18), and whether it
+  came from the relationship scan or was measured and confirmed in this
+  dialogue.
+- every composite key (`bk:` list, v1.18) in its hashed order.
 - count of `flattens[]` entries (#954, step 5.7), split into **bound** (named
   by a binding's `source_flatten:`) and **controls** (named by none). For each:
   its identity, `missing:`, `element_key:` (say *"ordinal — system-minted"*
@@ -2057,7 +2192,8 @@ summary of:
 - apply-prerequisite rows still open from 3.5 (#971) — every S, L, C and T row
   the operator skipped, listed under *"apply will stop on / report"*: an
   unregistered needed schema or an unresolvable concept stops apply at its
-  step 2b; a source with no loader is reported there, never blocking (#958 D8);
+  step 2b; a source with no loader is refused there (rule 8, blocking since
+  BB-1354), so 3.5 never leaves one open;
   a source with no time zone (an open T row) never blocks — its consumption
   dates stay bucketed in UTC and the consumption apply reports **Z8** (#977).
 
@@ -2098,6 +2234,16 @@ assert every hub-forming closed binding (one with `tables:` and no
 missing BK, do NOT write; stop and surface the gap from B12, resolving
 via B6/B7. A business key is declared, never guessed.
 
+**Save through the plan store, on every estate** (ADR-0049 amendment
+2026-11-18). On a local estate store the whole markdown with
+`PUT $BACKBONE/api/config/{tid}/design-plan` (`{"text": ..., "expected_sha256":
+...}`) against the estate's own backend, exactly as hosted does: the store
+judges the plan, starts it with its "generated; don't edit by hand" banner and
+writes the plan record `configs/design_plan.checked.yaml` in the same commit.
+**Never write `design_plan.md` with a file write**: a plan written past the
+store has no record and apply refuses it (`plan_written_by_plan_store`). Its
+answers are the hosted ones below.
+
 **On hosted:** there is no file to write. Store the whole markdown with
 `backbone_put_design_plan(tenant_id, text, expected_sha256)`, passing the
 `sha256` the last read returned (none for a first plan). Write every value out
@@ -2135,7 +2281,8 @@ brief above is never edited to absorb them>
 ```
 ~~~~~
 
-Write via `path.open("w")`.
+Send it with `PUT design-plan` as above; the store adds the banner as the
+file's first line, so do not write one yourself.
 
 **Post-write plan-contract check (#798, ADR-0029).** The plan is now on
 disk, so verify what was actually written rather than what was intended:
@@ -2195,34 +2342,31 @@ GET /api/validation/tenants/{tid}/plan-contract
     scoping, because it comes from one staging view). Show it, name the remedy
     (scope the binding's own entity too, or accept the merge), and let the
     operator decide. It is legal and often intended.
-- A **rule-2** finding (#619 5b, `prejoin_join_resolvable`) means a declared
-  prejoin (`fk_to_table` set) has no join column the scan or the target's
-  profile can supply — or, on an existing tenant, a materialised ledger prejoin
-  carries `fk_to_column: null` with its recorded `fk_to_column_gap`. Resolve it
-  here: correct `fk_to_table`, confirm the FK is `x`-direct (drop
-  `fk_to_table`), or tell the operator which table to profile / which schema to
-  re-scan before apply.
-- A **rule-8** finding (#958, `source_has_loader_binding`) — **info, never
-  blocking**: a registered source names no `loader:`, so no loader profile
-  resolves for it and its bindings take **no default loader-metadata
-  exclusion**. A loader's own metadata changes on every re-land of an unchanged
-  row, so anything of the loader's sitting in a satellite hashdiff writes a
-  spurious new satellite version on each extract. It is a legal, live shape —
-  a source with no `loader:` and a working `metadata_overrides.ldts` builds
-  correctly — which is why apply reports it and does not refuse it (#958 D8).
-  Surface it and name **both** remedies: register a loader for the source
-  (`POST /api/config/{tid}/loaders`), which declares that loader's plumbing once
-  for every binding of it, or declare `metadata_overrides.metadata_columns` per
-  binding (v1.10, the per-binding escape hatch). **The finding names no column,
-  and you must not supply one.** This gate reads ledgers and registrations,
-  never warehouse columns, so it cannot prove which of a table's columns are the
-  loader's own plumbing — that is exactly what no declaration has named. Do not
-  propose candidates by their names: a name-prefix guess is the inference #958
-  G1 refuses, and the reason B15 never proposes a `metadata_columns` entry
-  either. The operator declares them, or registers the loader that does.
-- `info > 0` → a bound table with no profile and no scan columns is unchecked.
-  Say so rather than reporting clean — on a first plan the honest answer is
-  often *"unverified"*.
+- A **rule-2** finding (`prejoin_join_resolvable`) judges a prejoin's **stated**
+  `fk_to_column` (v1.18). `prejoin_join_unstated` (**blocking**): the prejoin
+  states none; fill it as "Plan checks the warehouse itself" rule 6 says.
+  `prejoin_join_unresolved` / `prejoin_join_semi_structured` (**blocking**): the
+  stated column is not on the target's scan columns, or is not key-eligible;
+  re-measure with the operator, correct `fk_to_table`, or confirm the FK is
+  `x`-direct (drop `fk_to_table`). `prejoin_join_unchecked` (info): the target
+  table is not in the scan; re-scan the schema. On an existing tenant a
+  materialised ledger prejoin with `fk_to_column: null` is reported as before.
+- A **rule-8** finding (#958, `source_has_loader_binding`) is **blocking**
+  (ADR-0049, BB-1354, reversing #958 D8): a source the plan binds names no
+  `loader:` (a registered source the plan does not bind is not judged). Every planned source has a loader; assign one (step 3.5's L row,
+  `POST /api/config/{tid}/loaders`). **The finding names no column, and you
+  must not supply one**: never propose loader-metadata columns by their names
+  (#958 G1).
+- A `plan_carries_unverified` finding (**blocking**): a binding carries an
+  ADR-0030 `unverified:` block. Live-check the binding and remove the block
+  (step 8, "Cutover re-plan").
+- A `plan_written_by_plan_store` finding (**blocking**, apply's read site only):
+  the plan on disk has no plan record, or its `## Plan` fingerprint differs from
+  the record's. Saving the plan through `PUT design-plan` clears it; a plan
+  written before BB-1354 is re-planned (step 8, "Cutover re-plan").
+- `info > 0` → a bound table with no scan columns is unchecked. Say so rather
+  than reporting clean. Plan binds only scanned tables, so this means the scan
+  is stale: re-scan before handing off.
 
 A blocking finding here means the plan would be **refused at apply's entry**, so
 handing off without resolving it just moves the failure later and further from
@@ -2230,8 +2374,9 @@ the person who can fix it.
 
 Confirm to the user:
 
-> *"Wrote `{estate root}/<tid>/configs/design_plan.md` — plan-contract check
-> clean (`<n>` bindings, 0 blocking). Run `/backbone-apply <tid>` when ready to
+> *"Saved `{estate root}/<tid>/configs/design_plan.md` through the plan store
+> (record `configs/design_plan.checked.yaml`, `plan_fingerprint <fingerprint>`) —
+> plan-contract check clean (`<n>` bindings, 0 blocking). Run `/backbone-apply <tid>` when ready to
 > execute — the executor (#562) consumes this file."*
 
 Do **not** chain into `/backbone-apply`. The split between
@@ -2350,11 +2495,102 @@ recorded after its `accepted_at`. Copy existing entries verbatim (surgical write
 entry whose release has run on PROD may be removed in a later pass, at the operator's
 word. Never add an entry the operator did not accept.
 
+**8.2 Cutover re-plan — a plan written before BB-1354.** A plan with no plan
+record (`configs/design_plan.checked.yaml`), or one carrying `unverified:` blocks
+or a prejoin with no `fk_to_column`, is refused at apply
+(`plan_written_by_plan_store`, `plan_carries_unverified`, rule 2). Re-plan it
+**from the plan on disk, never from zero**, and check only what needs checking:
+
+**On hosted:** read the starting point with
+`backbone_get_design_plan_cutover(tenant_id)` (the same answer as the `GET` below;
+`not_found` / `design_plan_missing` when there is no plan), live-check with
+`snowflake_query`, and store with `backbone_put_design_plan`. Make no REST call.
+
+1. **Read the cutover's starting point** (read-only; it stores nothing):
+
+   ```
+   GET $BACKBONE/api/config/{tid}/design-plan/cutover
+   ```
+
+   It returns `plan_text` (the plan on disk with the fills below), `to_check`,
+   `fk_to_column_filled`, `bk_order_written`, `unverified_removed`,
+   `metadata_written`, `include_columns_written`, `excluded_columns_written`,
+   `column_conflicts` and `comments_dropped`. The cutover runs **once**: on a plan already saved
+   through the plan store (v1.18: it starts with the plan banner and has a plan
+   record) it is refused with 409 `plan_already_v1_18`; re-plan incrementally
+   instead. The fills are made as text edits, so the plan's YAML
+   comments (its decision rationale) survive; `comments_dropped: true` means one
+   edit could not be placed that way and the `## Plan` block was re-written
+   without its comments.
+   - Each existing prejoin's `fk_to_column` is filled from its current ledger.
+     A prejoin the ledger cannot fill is in `to_check` with
+     `fk_to_column_unresolved`: measure and confirm it ("Plan checks the
+     warehouse itself", rule 6).
+   - Each composite business key is written as a `bk:` list. The mapping caches
+     are read **once**, here, as migration evidence: where a cache holds the
+     key's columns in another order than the ledger, the cache's order is the
+     one the live hash keys were built in, so it is written into the plan
+     (`"from": "mapping_cache"`), and every existing hub keeps its hash keys.
+     After the cutover nothing reads the caches.
+   - Every `unverified:` block is removed and its binding is in `to_check`.
+   - Each binding's amount / date tags (BB-1419) are read **once**, here, from
+     the body on disk of **every** table it binds, and written as `metadata:`
+     (`metadata_written`): `amt` / `dt` where the body has a tag the stamp's name
+     and type rule would not give, `none` where the body has no tag and the rule
+     would give one. A re-stamp then gives every body the tags it has today, so no
+     built column is renamed. Each body column the ledger does not hold (it would
+     leave the body and change the satellite's hashdiff) is written as
+     `include_columns:` (`include_columns_written`). An entry the plan already
+     states is never overwritten. Where the tables of a multi-table binding
+     disagree on a column (a different tag, or the column absent from one), no
+     entry is written and the column is in `column_conflicts`: decide it with the
+     operator. After the cutover nothing reads a body.
+   - Each column a binding's ledger keeps out of every satellite (an attribute's
+     `target: __excluded__`, a key's `excluded: true`, BB-1073) is written as
+     `excluded_columns:` (`excluded_columns_written`) when every table's ledger
+     excludes it, so apply keeps the exclusion. A disagreement, or a column the plan
+     lists under `include_columns:`, is in `column_conflicts`. A plan cut over
+     before BB-1073 is not cut over again (the 409 above): state such an exclusion
+     in the plan by hand; the plan-contract check names each one
+     (`excluded_column_enters_satellite`).
+2. **Live-check only `to_check`**: bindings added since the last apply
+   (`added`), whose key or foreign keys changed (`business_key_changed`,
+   `foreign_keys_changed`), that carried an `unverified:` block (`unverified`),
+   or whose prejoin needs measuring. Run every check those bindings need (B15's
+   load timestamps, B17, B20, B16's compile-tests, the `fk_to_column`
+   measurement). Every other binding is copied as the endpoint returns it.
+3. **All or nothing.** If the warehouse cannot be reached during these checks,
+   store nothing: the plan on disk and its (absent) record stay as they are.
+4. **Preview, confirm, save** with `PUT design-plan` (step 7), which writes the
+   record. The preview lists, for the operator to confirm before the save:
+   - **every `fk_to_column_filled` entry** (entity, source, table, column and the
+     `fk_to_column` taken from the ledger). Those values came from the ledger,
+     which `save_ledger`'s resolver filled; no plan check ever confirmed them.
+     Ask the operator to confirm each one, or measure it (rule 6) where they are
+     unsure. One they reject is corrected in the plan before the save.
+   - each `bk_order_written` entry whose order came from the mapping cache
+     (`"from": "mapping_cache"`): it is the order the live keys were built in.
+     Its ledger still holds the other order, so apply refuses the binding
+     (`ledger_key_order_matches_plan`) until its ledger is deleted and re-applied,
+     which keeps the live hash keys.
+   - the count of `metadata_written` entries per binding (BB-1419): they keep
+     the built column names as they are; no confirmation is needed.
+   - every `include_columns_written` entry (BB-1419): columns the vault holds
+     today that the ledger lacks; confirm each stays.
+   - every `excluded_columns_written` entry (BB-1073): columns kept out of every
+     satellite today; confirm each stays out.
+   - every `column_conflicts` entry: the column, the key (`metadata`,
+     `include_columns` or `excluded_columns`), the reason and each table's tag. Decide each with the
+     operator before the save.
+   - when `comments_dropped` is true, say so: the `## Plan` block lost its YAML
+     comments. Offer to restore the rationale they held (from the plan on disk,
+     read with `GET design-plan`) before the save.
+
 ---
 
-## Dialogue behaviours (B1–B21)
+## Dialogue behaviours (B1–B22)
 
-Every parser run must handle all of B1–B21. Each behaviour names its
+Every parser run must handle all of B1–B22. Each behaviour names its
 originating card in its own heading.
 
 ### B1. Named-but-missing table — hard ambiguity, must ask
@@ -2719,7 +2955,10 @@ Parser:
   that prejoin, **or unless the FK carries parent columns** (`carry:`,
   v1.11 — a carry needs `fk_to_table` stated, #975 C1). Absent means the
   `x` direct key — the default (ADR-0008; the executor resolves it at
-  apply step 5c).
+  apply step 5c). **A pinned prejoin states `fk_to_column` too (v1.18,
+  BB-1354):** the column of `fk_to_table` the surrogate joins to, taken from the
+  relationship scan's edge or measured and confirmed ("Plan checks the warehouse
+  itself", rule 6). Never leave it for apply to look up.
 - **Carry — CONFIRM, never infer (#975, ADR-0031 Amendment 5).** A
   consumption grain reads only its own satellite, so a line that must be
   dated or scoped by a fact that lives on its parent (the order's
@@ -2748,6 +2987,10 @@ Parser:
   - never propose a loader-metadata column of the parent (a load stamp —
     it would version every line on every load; rule 9 **C4** refuses it)
     or the parent's own BK (already fetched as the key; **C6**);
+  - never propose a column the parent binding lists under
+    `excluded_columns` (B22): the carry would copy it into the child's
+    satellite, and rule 9 **C16** refuses it. An exclusion is per binding,
+    so a carry does not inherit it: check the parent's list;
   - propose `as:` only when the default child-side name would collide
     (two FKs carrying one parent column, **C5**) or is a SQL keyword or
     function name (C8's keyword arm) — otherwise the line reads the
@@ -2972,18 +3215,9 @@ The contract:
   — not expected), and render the matrix so the coverage is visible at a
   glance.
 - **Never silently invent.** A gap is resolved only by an operator
-  choice. When the operator binds a table the scan lacks, it rides the
-  **B1 named-but-missing** path: recorded with its declared BK / FK, and
-  marked an unverified value —
-  write `unverified: [{reason: [table_never_examined], note: …}]` onto that
-  binding, with the canonical sentence as the note:
-  > *"`<SOURCE>.<TABLE>` wasn't in the source scan, so its column references are unchecked. Confirmed when the plan is applied."*
-  The scope of that mark is exactly the checks that depend on the scan —
-  column existence for `bk`, `foreign_keys[].column`, `metadata_overrides`
-  values and a transform's `as:`. It does **not** cover checks whose evidence
-  came from elsewhere: a live BK probe that ran and passed on this table
-  stays verified (ADR-0030 decision 3). Do not pretend a non-scanned table
-  was scan-verified, and do not stamp a live-probed key as unchecked.
+  choice. **Plan binds only scanned tables** (ADR-0049 decision 4): a table
+  the scan lacks is not bound. The operator re-scans the source and the table
+  is planned once it is scanned, or the cell is left unbound.
 - **Ask one cell at a time, with options** — *bind a named table* /
   *leave unbound* / *re-profile the source*. A structured
   single-question-per-cell prompt is the right surface. Propose the
@@ -3001,12 +3235,9 @@ The contract:
 - **Feed the scan bug.** A missed cell whose table name is a known core
   alias is a scan defect — note it against the standing card (#607) so
   the scan converges and this stage shrinks.
-- **Gap-resolved bindings are ordinary bindings.** They carry their
-  declared BK / FK exactly like any other binding; what differs is that
-  their column references are an unverified value
-  carrying a deferred obligation apply settles at step 4d
-  (ADR-0030).
-  **B11/B12 still apply to them at write.**
+- **Gap-resolved bindings are ordinary bindings.** They are bound from a
+  scanned table and carry their declared BK / FK and every live check exactly
+  like any other binding. **B11/B12 still apply to them at write.**
 
 B13 is to **coverage** what B6 is to **business keys** and B10 is to
 **foreign keys**: the scan/inference is a *suggestion*, the operator's
@@ -3139,8 +3370,8 @@ The contract:
   **When `schema_loader.yaml` is absent** — a tenant can reach `/backbone-plan`
   without it (hand-provisioned, restored snapshot, partial onboarding), and the
   stage's first instruction is then unexecutable. The defined behaviour is
-  **infer, confirm with the operator, record as unverified** (#774) — never
-  hard-error, never silently pick. Infer the loader from the landed columns in
+  **infer, confirm with the operator, register it** (#774, step 3.5's L row) —
+  never hard-error, never silently pick. Infer the loader from the landed columns in
   `scan_results.json`, using these fingerprints, which are stated here so every
   run uses the same ones:
   - `_FIVETRAN_SYNCED` / `_FIVETRAN_DELETED` present ⇒ **`fivetran`**
@@ -3170,13 +3401,9 @@ The contract:
   Put the inference to the operator once per schema (*"`<SCHEMA>` has no loader
   registered in `schema_loader.yaml`; its columns look like `<loader>` — use that
   profile?"*),
-  and whatever they confirm, mark **every** binding in that schema an
-  unverified value with
-  `reason: [guessed_load_method]` and the canonical note:
-  > *"`<SOURCE>.<TABLE>`'s load timestamps are a guess; we couldn't tell which tool loads this schema. Confirmed when the plan is applied."*
-
-  An operator confirmation is not the missing evidence: `schema_loader.yaml` is,
-  and apply step 4e is where it is settled against the real profile.
+  and register what they confirm (step 3.5's L row). Then check each binding's
+  load timestamp live ("Plan checks the warehouse itself", rule 3): that
+  measurement, not the guess, is the evidence.
 - **Validate the referenced column against the scan.** Extract the column
   identifier from the loader value (bare column, or unwrap
   `to_varchar(<col>)` / `to_timestamp_tz(<col>)`); a value referencing no
@@ -3187,46 +3414,23 @@ The contract:
   case-insensitively against that table's `columns[].COLUMN_NAME`
   (UPPERCASE — see the step-2 shape note). Present ⇒ clean default ⇒
   **no block**.
-  **When the table is not in the scan at all** — the gap-resolved case (B13) —
-  there is nothing to validate against, and inheriting the loader default
-  silently would make the binding read exactly like a verified one. Inherit the
-  default, do **not** block, and mark the binding an
-  unverified value with
-  `reason: [table_never_examined]` (the same annotation B13 wrote — merge into
-  it, never write a second block). Apply settles it at 4d/4e, which already
-  **HARD ERRORs** on a metadata column that turns out absent, so the 422
-  backstop B13 promises does cover metadata fields and not only BK/FK.
+  A table that is not in the scan is not bound (B13), so there is always a
+  column list to validate against.
 - **Present is not populated (#772).** A column that exists and is NULL in
   every row passes the presence test above and still breaks the build — worse
-  than absence, because it builds green once and fails forever after. Check
-  the resolved `ldts` / `etl_runid` via
-  `GET /api/validation/tenants/{tid}/metadata-population`;
-  a `blocking` finding is handled exactly like an absent column (rank a
-  substitute) and an `advisory` one is surfaced and never refused. **A check
-  that could not run is not a clean check.** The endpoint is ledger-driven and a
-  cold-start plan has no ledgers, so it answers `scanned: 0, findings: []` —
-  **byte-identical to "I checked every binding and they are all fine."** Read
-  `scanned: 0`, or `scanned` short of the bindings you are walking, or a
-  per-table `unprofiled` finding, as **did not run**, and mark each unchecked
-  binding an unverified value with
-  `reason: [contents_never_examined]` and the canonical note:
-  > *"`<SOURCE>.<TABLE>` hasn't been profiled, so we can't tell whether its load timestamp column carries data. Confirmed when the plan is applied."*
-
-  Never infer population from the absence of findings. This is the #772 failure
-  class — a NULL reading as a populated value — reproduced one level up, inside
-  the check built to prevent it. `smdt` is excluded from this reason as it is
-  from the check itself: nullable by design, so "empty" is never a finding for it.
-  Ranking a substitute is why the
-  check runs **here** and not only at apply — plan time is the last point
-  where a different column can still be chosen. A **zero-row** table is
-  never a finding: "every row is NULL" and "there are no rows" are
-  different states, and an unlanded table is the normal case for a new
-  source. `smdt` is **excluded** — inert and
-  nullable by design (#771 owns its policy). Judged at the **expression**,
-  not the column: `coalesce(A, B)` is only provably NULL when *both* arms
-  are, and warning on a partly-NULL first arm would punish the correct fix.
-  The scan cannot answer this — it carries `IS_NULLABLE`, not a null rate —
-  so the authoritative gate is apply 4e, which runs after the deep profile.
+  than absence, because it builds green once and fails forever after. Check the
+  resolved `ldts` / `etl_runid` **live, on the planned table and expression**
+  ("Plan checks the warehouse itself", rule 3: `COUNT(*)`,
+  `COUNT_IF((<expr>) IS NULL)`), never from ledgers or the metadata-population
+  endpoint, which reads ledgers and on a fresh tenant answers `scanned: 0`.
+  NULL in every row is handled like an absent column: rank a substitute below,
+  or the table is a **data-readiness gap** and stays out of the plan. A
+  **zero-row** table is never a finding: "every row is NULL" and "there are no
+  rows" are different states, and an unlanded table is the normal case for a
+  new source. `smdt` is **excluded** — inert and nullable by design (#771 owns
+  its policy). Judged at the **expression**, not the column: `coalesce(A, B)` is
+  only provably NULL when *both* arms are. Plan time is the last point where a
+  different column can still be chosen, which is why the check runs here.
 - **Suggest then floor.** On a gap, rank scan columns by `DATA_TYPE`
   (TIMESTAMP / TIMESTAMP_TZ / TIMESTAMP_NTZ / TIMESTAMP_LTZ / DATETIME /
   DATE first for `ldts`; **any** type is acceptable for
@@ -3276,19 +3480,15 @@ The contract:
   separately, the bindings carrying a `metadata_columns` addition. Supply
   those counts; do not restate the bullets here.
 
-The cross-check is **read-only** against `scan_results.json` +
-`schema_loader.yaml` + `loader_metadata.yaml` — no new Snowflake
-round-trip.
+The presence cross-check is **read-only** against `scan_results.json` +
+`schema_loader.yaml` + `loader_metadata.yaml`; the population check is one
+read-only `snowflake_query` per bound table.
 
 ### B16. Field-level hard rule — raw-SQL `transforms:` + live compile-test (#624)
 
 **On hosted:** the transform is SQL text: apply step 0's SQL text rule before it
-goes into the plan. The live compile-test is skipped (no warehouse query tool is
-served on hosted): write no `tested:` stamp, and record the binding as
-**advisory unverified**, `unverified: [{reason: [warehouse_unreachable], note:
-<its canonical sentence>}]`, listed as an advisory line in the step-6 preview.
-The first build or run proves it, so offer apply as the settlement route, not a
-re-plan: a hosted re-plan cannot run it either.
+goes into the plan. The live compile-test runs through `snowflake_query`, as on
+a local estate.
 
 Powers the **step 4.8 stage**. The brief sometimes states a source stores a
 business key in a **different representation** than the hub it must integrate
@@ -3353,19 +3553,11 @@ before it reaches the ledger. The contract:
   **not** the forbidden proactive schema enumeration.
 
   **When the probe cannot run at all** — no warehouse connection, as distinct
-  from an expression that failed to parse — do **not** block, do **not** write a
-  `tested:` stamp, and do **not** invent one. Write the entry with `as` / `expr`
-  / `reason` only, and mark the binding an
-  unverified value with
-  `reason: [warehouse_unreachable]` and the canonical note:
-  > *"We couldn't reach the warehouse, so `<SOURCE>.<TABLE>`'s live checks didn't run: business-key quality, and any transform compile-test. Settled by re-planning once the warehouse is reachable, or when the plan is applied."*
-
-  Tell the operator both routes, and lead with the re-plan one: a re-plan
-  returns them to this dialogue, where the remedies are still available; apply is
-  strict-batch and can only stop and redirect. A parse or type failure is the
-  **other** case entirely — that is a check that ran and answered *no*, and it
-  still blocks the write verbatim as above. Same policy as B17 (#775/#783 are one
-  decision, ADR-0030).
+  from an expression that failed to parse — stop and store nothing ("Plan
+  checks the warehouse itself", rule 4): the operator re-runs `/backbone-plan`
+  once the warehouse answers. A parse or type failure is the **other** case
+  entirely — that is a check that ran and answered *no*, and it still blocks the
+  write verbatim as above.
 - **Compile-green ≠ integration-correct.** The probe proves the expression
   compiles and runs; it does **not** prove the transformed key actually
   integrates with the counterpart source (the prefix rule matches only ~962 of
@@ -3398,17 +3590,14 @@ before it reaches the ledger. The contract:
 
 ### B17. BK-quality — live probe that the declared BK is complete + unique (#639)
 
-**On hosted:** there is no warehouse query tool, so (BB-1313) measure a
-**single-column** declared `bk:` with
+**On hosted:** measure a **single-column** declared `bk:` with
 `backbone_key_candidates(tenant_id, source_name, table, confirm=[<bk column>])`.
 It measures the whole table exactly; a `confirmed[]` entry with `qualifies: true`
 is B17's pass (complete and unique on every row), `qualifies: false` is B17's
 fail with the entry's `completeness` and `uniqueness` as the figures. The
 binding's source filter and key transforms are **not** applied: on a filtered or
-transformed binding record the result as advisory unverified with the
-measurement quoted. A composite `bk:` is not measured as one key: record it
-advisory unverified (`reason: [warehouse_unreachable]` and its canonical note),
-and the first build or run proves it.
+transformed binding, and for a composite `bk:`, run B17's probe with
+`snowflake_query` instead (the filter and the key expression as written).
 
 **When a key can't be confirmed.** `refused[]` gives one reason per column; act
 on it, never retry the same call, and never fall back to `snowflake_describe_table`:
@@ -3417,13 +3606,13 @@ on it, never retry the same call, and never fall back to `snowflake_describe_tab
   right column; re-probe that one.
 - `type_cannot_be_key`: show the `type`. Ask the operator for another column,
   or a key transform that casts it (B16's transform rules); a transformed key is
-  advisory unverified, as above.
+  probed with `snowflake_query`, as above.
 - `excluded`: quote the `rule`. A loader-metadata column is never a business
   key: ask for the source's own key. A column this call excluded was named in
   your own `exclude`: drop it from `exclude` only if the operator confirms it
   is not one of the binding's foreign keys.
-An unmeasured key is recorded advisory unverified with the reason quoted,
-listed in the step-6 preview; the first build or run proves it.
+A key that cannot be measured is not stored: it stays a Gap with the reason
+quoted until the operator names a key that can be.
 
 Runs **inline in the step-4 entity walk**, once per **hub-forming** binding,
 **right after B6/B7 lock the declared `bk:`** and before the binding is added
@@ -3469,23 +3658,15 @@ FROM <SCHEMA>.<TABLE>
 - **Composite BK** — when the effective BK is a composite/derived expression
   (a prior remedy, or a concat key the operator declared), probe the **concat
   expression**, not a single column: `COUNT(<expr>)` / `COUNT(DISTINCT <expr>)`.
-- **When the probe cannot run.** Two distinct cases, and neither is a pass.
-  - **No warehouse connection** — the probe could not run for any binding.
-    Do not block, do not fall back to the scan, and do not let the BK read as
-    clean: mark the binding an
-    unverified value with
-    `reason: [warehouse_unreachable]` and the canonical note:
-    > *"We couldn't reach the warehouse, so `<SOURCE>.<TABLE>`'s live checks didn't run: business-key quality, and any transform compile-test. Settled by re-planning once the warehouse is reachable, or when the plan is applied."*
-
-    Offer the re-plan route first — it is the one that returns the operator to
-    this dialogue, where the three B17 remedies are still available. Same policy
-    as B16's compile-test; they are one decision
-    (ADR-0030).
-  - **The probe ran and errored on this table** — the binding was gap-resolved
-    (B13, not in the scan) and the table or column does not exist. That is
-    `table_never_examined` doing its job: B13 already annotated the binding,
-    so surface the error, leave the annotation in place (a wrong column surfaces
-    as a 422 at apply), and move on. **Never treat a failed probe as a clean BK.**
+- **When the probe cannot run.** Neither case is a pass.
+  - **No warehouse connection** — stop and store nothing ("Plan checks the
+    warehouse itself", rule 4). The operator re-runs `/backbone-plan` once the
+    warehouse answers, which returns them to this dialogue, where the three B17
+    remedies are still available.
+  - **The probe ran and errored on this table** — the table or column does not
+    exist. Plan binds only scanned tables, so this means the scan is stale or
+    the declared column is wrong: surface the error and resolve it with the
+    operator (B7) or re-scan. **Never treat a failed probe as a clean BK.**
 
   `scan_results.json` is **not** a substitute for either case: its
   `primary_bk.is_unique` / `distinct_ratio` slots are computed only for the
@@ -3559,11 +3740,8 @@ tuned to match exactly.
 ### B18. Source-grain filter declaration — hoist a repeated clause (#806 slice 4)
 
 **On hosted:** the proposals come from
-`backbone_get_source_filter_candidates(tenant_id)`. Item 3's exclusion probe is
-skipped (no warehouse query tool is served on hosted): classify each
-`uncovered[]` table `unknown`, record each affected bound binding as **advisory
-unverified** (`reason: [warehouse_unreachable]`), and never let the declaration
-read as confirmed. The clause is SQL text: apply step 0's SQL text rule.
+`backbone_get_source_filter_candidates(tenant_id)`. Item 3's exclusion probe
+runs through `snowflake_query`, as on a local estate. The clause is SQL text: apply step 0's SQL text rule.
 
 Powers the **step 5.5 stage**. B9's sibling at the other grain: B9 records a
 judgment about *one* binding; B18 declares *source hygiene* once and lets every
@@ -3721,9 +3899,9 @@ contribution, `kind` `bk` or `x-direct-fk`. It measures before the first
 and an incremental run measures the new source, not the stored plan's. The
 tool takes names only: no `filter_sql` and no `key_expr` is sent, so a
 contribution from a filtered or transformed binding measures the whole column.
-Quote that entity's figures with that said, and record the measurement as
-advisory unverified with the note "whole table measured; the binding's filter
-or key transform was not applied". Omitting `contributions` measures the stored
+Quote that entity's figures with that said ("whole table measured; the
+binding's filter or key transform was not applied"); where the filter or
+transform could change the answer, measure it with `snowflake_query`. Omitting `contributions` measures the stored
 plan's bindings, with their filters and transforms: use that only when the
 stored plan already holds every contribution you would send.
 
@@ -3999,8 +4177,8 @@ question in step 5 is what stops them firing at apply.
 columns)`, `columns` being the binding's relationship-key columns, and item 2 is
 `backbone_key_candidates(tenant_id, source_name, table, exclude,
 loader_metadata, confirm)`, `confirm` being the exact re-probe of a chosen key.
-Neither applies the binding's source filter: on a filtered binding, record the
-measurement as advisory unverified. `confirm` measures any column the live
+Neither applies the binding's source filter: on a filtered binding, measure it
+with `snowflake_query` and the filter as written. `confirm` measures any column the live
 table has, however wide the table; what it cannot measure comes back under
 `refused` with one reason per column (BB-1313). The **When a key can't be
 confirmed** rule in B17 applies to each.
@@ -4100,16 +4278,12 @@ hold, and a 0.4 % loss is indistinguishable from a 4 % loss to anybody reading
 a total downstream. A binding whose pair is already unique **passes silently** —
 no message, no friction for a line table that is naturally keyed.
 
-**When the probe cannot run.** Identical policy to B17, because it is the same
-decision (ADR-0030):
+**When the probe cannot run.** Identical policy to B17:
 
-- **No warehouse connection** — mark the binding an
-  unverified value with
-  `reason: [warehouse_unreachable]` and the canonical note:
-  > *"We couldn't reach the warehouse, so `<SOURCE>.<TABLE>`'s live checks didn't run: business-key quality, and any transform compile-test. Settled by re-planning once the warehouse is reachable, or when the plan is applied."*
-- **The probe ran and errored on this table** — the binding was gap-resolved
-  (B13, not in the scan). Surface the error, leave B13's `table_never_examined`
-  annotation in place, and move on.
+- **No warehouse connection** — stop and store nothing ("Plan checks the
+  warehouse itself", rule 4).
+- **The probe ran and errored on this table** — the scan is stale or a column
+  is wrong. Surface the error and resolve it with the operator, or re-scan.
 
 **Never treat a failed probe as "no collapse".** An unmeasured binding is
 unmeasured; it is not clean.
@@ -4303,6 +4477,67 @@ read". So the binding must name what it has.
    table's key column names and representation, and a snapshot-time column (when
    the list was read), replaced or appended on every run.
 
+### B22. Excluded columns — personal data kept out of every satellite (BB-1073)
+
+**When:** step 5.11, once per closed binding (not an open binding, which names no
+table, and not a flatten-fed binding: leave the column out of the flatten
+declaration's `carry:` instead).
+
+1. **Never infer it from a name.** Which columns are personal data is the
+   tenant's data standard, not something the scan shows. Write an entry **only**
+   when the brief states the standard or the operator names the column. Finding and
+   labelling personal-data columns from the scan is a separate card (BB-1409).
+2. **Ask per table** when the brief carries a data standard: *"Which columns of
+   `<SOURCE>.<TABLE>` should enter no satellite (for example a free-text note, or
+   a JSON blob that can carry a customer's own words)?"*
+3. **Check each named column** against the table's scan columns plus the
+   binding's `transforms[].as`; offer the real column list for a name that is not
+   there. List each column once, UPPERCASE.
+4. **A key may be excluded.** A business key or a foreign key's source column
+   still feeds staging and its hash key; the satellite payload drops its
+   business-key copy, so the business vault loses `bk__<col>` for that binding.
+   Say so plainly when the operator names one: **excluding a key removes only its
+   satellite copies; the hub keeps the value** in plain text (its business keys),
+   and so does the staging view. A child's link satellite can still carry the key
+   through a prejoin, because the hub holds it anyway. Withholding a personal-data
+   key from consumption is a separate card (BB-1075).
+5. **A transform that reads it.** When a `transforms[].expr` of the binding
+   names an excluded column, the check returns `excluded_column_in_transform`:
+   a derived column can still carry the excluded data. Ask whether the derived
+   column keeps any of it, and exclude it too if it does.
+6. **Never both.** A column under `metadata_overrides.metadata_columns` stays in
+   the payload, and one under `include_columns:` (v1.18) is brought into the vault;
+   neither can also be excluded (`excluded_column_is_metadata`,
+   `excluded_column_included`). Ask which the operator means. The load timestamp
+   and batch id columns (`ldts`, `etl_runid`) cannot be excluded: their values land
+   in every satellite's load-stamp column anyway (`excluded_column_is_load_stamp`),
+   and neither can a column named `LDTS` or `RSRC`
+   (`excluded_column_is_system_name`). The effective-date (`smdt`) column and a
+   loader profile's `metadata_columns` stay payload attributes and **may** be
+   excluded, e.g. a raw-record JSON blob. A flatten that carries or flattens an
+   excluded column is an advisory (`excluded_column_carried_by_flatten`): ask
+   whether the flatten should leave it out. A `metadata:` tag on an excluded column
+   is allowed but does nothing while it is excluded
+   (`excluded_column_stated_metadata`, advisory): leave it out unless the operator
+   wants it kept for a later release.
+7. **Per binding.** An exclusion covers this binding only: another binding
+   on the same table that does not list the column still carries it, and a
+   child's `carry:` of it is refused (rule 9 **C16**). When the standard covers
+   the table, ask for the list on every binding of it.
+8. **A column already in a satellite.** When the binding has been applied before,
+   the plan-contract check returns `excluded_column_leaves_satellite` for a column
+   a satellite carries today. Read its message to the operator before storing the
+   plan: the satellite's hashdiff changes, it needs a full refresh, and where the
+   landing keeps only current rows that refresh loses its earlier versions. It
+   does not block; the operator decides.
+
+```yaml
+      - name: CRM
+        tables: [SUPPORT_TICKET]
+        bk: TICKET_ID
+        excluded_columns: [MESSAGE_BODY, REQUESTER_EMAIL]
+```
+
 ### Scan classification cross-check — declared binding vs scan domain (#568)
 
 Wired into the entity walk at **step 4, point 4** (after each binding is
@@ -4352,8 +4587,9 @@ For every **closed** binding `(slug, source, table)`:
 
 - A table the scan did not classify at all (absent from every
   suggestion) is treated as divergent — it is the **B1 named-but-missing
-  / Coverage-Gap (B13)** territory: surface the same three-way choice,
-  noting the table is an unverified value for reason `table_never_examined`, settled when the plan is applied — write the annotation onto the binding exactly as B13 does.
+  / Coverage-Gap (B13)** territory. A table that is in the scan but in no
+  suggestion is bound like any other scanned table; one missing from the scan is
+  not bound until it is scanned (B13).
 - `GENERIC_LANDING` and other own-domain tables (e.g.
   `MARKETPLACE_RECONCILIATION` classified under its own
   `marketplace_reconciliation` domain) diverge by construction — they

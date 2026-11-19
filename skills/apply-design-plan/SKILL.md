@@ -1,6 +1,6 @@
 ---
 name: apply-design-plan
-description: Drive a Backbone tenant from "state 1" (sources connected + scanned, no adopted ontology, no body, no build) to a successful build by applying the design plan at {estate root}/{tid}/configs/design_plan.md. Profiles bound tables itself (step 4d) — state 1 ships the scan, not deep profiles. Strict batch — no Socratic dialogue, no hardcoded plan, no growth branch. Missing or invalid plan hard-errors back to /backbone-plan.
+description: Drive a Backbone tenant from "state 1" (sources connected + scanned, no adopted ontology, no body, no build) to a successful build by applying the design plan at {estate root}/{tid}/configs/design_plan.md. Executes the plan against the scan — no profile, no mapping cache and no warehouse-data query (BB-1419, ADR-0053). Strict batch — no Socratic dialogue, no hardcoded plan, no growth branch. Missing or invalid plan hard-errors back to /backbone-plan.
 ---
 
 # apply-design-plan
@@ -25,9 +25,9 @@ invent entities, must not fall back to a hardcoded plan.
 The user runs `/backbone-apply <tenant_id>`. The tenant has Snowflake
 sources connected and **scanned** (state 1, which `/backbone-onboard` ends at —
 `scan_results.json` present) AND a design plan written by `/backbone-plan`. Note: state 1
-ships the **scan only**, NOT the deep per-table profiles that
-`save_ledger`/`stamp` need — the skill profiles bound tables itself in
-**step 4d**. "No ontology" in state 1 means no *adopted* ontology
+ships the **scan only** — and that is all apply needs: it reads the plan and
+the scan, never a deep profile, the mapping cache or the warehouse's rows
+(BB-1419, ADR-0053). "No ontology" in state 1 means no *adopted* ontology
 (`configs/ontology.yaml`, the plan-scoped projection a reset deletes):
 every provisioned tenant holds an `ontology_library.yaml` from birth and
 always has concepts to adopt from (ADR-0024 decision 1, #737b). If the plan is missing the skill hard-errors with a redirect
@@ -37,7 +37,7 @@ always has concepts to adopt from (ADR-0024 decision 1, #737b). If the plan is m
 
 | | Reads | Writes |
 |---|---|---|
-| Inputs | `{estate root}/{tid}/configs/design_plan.md`, `{estate root}/{tid}/configs/schema_loader.yaml` — the source registry, keyed by source since #838 and read through `GET /api/config/{tid}/sources` (source → schemas + loader, 4.0/4e; also the **write** target for source-grain filter declarations, 3b, and BKCC declarations, 3c), `{core assets}/configs/loader_metadata.yaml` (loader-profile defaults, 4e), `{estate root}/{tid}/configs/source_profiling/scan_results.json` + deep profiles (metadata-column validation, 4e), tenant context via `backbone_get_tenant_context`, core ontology via `backbone_resolve_core_concept`, materialised ledgers via `backbone_list_ledgers` (4c gate), ledger YAMLs at `{estate root}/{tid}/configs/ledgers/` | ontology.yaml (via `backbone_create_entity`), `schema_loader.yaml` source-grain filter declarations (via `PUT /api/config/{tid}/source-filters/{source}`, 3b/#806) and BKCC declarations (via `PUT /api/config/{tid}/sources/{source}/bkcc`, 3c/#840), flatten declarations under `configs/flattens/` (via `PUT /api/config/{tid}/flattens/{source}/{table}/{array_column}?written_by=apply`, 3d/#954), flatten unions under `configs/flatten_unions/` (via `PUT /api/config/{tid}/flatten-unions/{name}?written_by=apply`, 3e/#954 slice 13), flatten-fed binding ledgers (via `PUT /api/config/{tid}/flattens/{source}/{table}/{array_column}/bindings/{entity}`, 4a.1/#954 — never `assign` or `save_ledger`), every ledger of a BKCC-declared source re-written (4d.1), ledger YAMLs (closed bindings via `backbone_assign_source_to_entity` — **declared BK stamped at bind time, #582**, open via `backbone_auto_configure_sources`, `backbone_save_ledger` for primary + filter overrides + foreign-key relationship_key columns; **deviation-only `metadata_overrides` block written directly onto the ledger YAML, 4e/#615**), body YAMLs (via `backbone_stamp_body_config`), build artefacts (via `backbone_start_build`) |
+| Inputs | `{estate root}/{tid}/configs/design_plan.md`, `{estate root}/{tid}/configs/schema_loader.yaml` — the source registry, keyed by source since #838 and read through `GET /api/config/{tid}/sources` (source → schemas + loader, 4.0/4e; also the **write** target for source-grain filter declarations, 3b, and BKCC declarations, 3c), `{core assets}/configs/loader_metadata.yaml` (loader-profile defaults, 4e), `{estate root}/{tid}/configs/source_profiling/scan_results.json` (metadata-column validation, 4e — never a deep profile, BB-1419), tenant context via `backbone_get_tenant_context`, core ontology via `backbone_resolve_core_concept`, materialised ledgers via `backbone_list_ledgers` (4c gate), ledger YAMLs at `{estate root}/{tid}/configs/ledgers/` | ontology.yaml (via `backbone_create_entity`), `schema_loader.yaml` source-grain filter declarations (via `PUT /api/config/{tid}/source-filters/{source}`, 3b/#806) and BKCC declarations (via `PUT /api/config/{tid}/sources/{source}/bkcc`, 3c/#840), flatten declarations under `configs/flattens/` (via `PUT /api/config/{tid}/flattens/{source}/{table}/{array_column}?written_by=apply`, 3d/#954), flatten unions under `configs/flatten_unions/` (via `PUT /api/config/{tid}/flatten-unions/{name}?written_by=apply`, 3e/#954 slice 13), flatten-fed binding ledgers (via `PUT /api/config/{tid}/flattens/{source}/{table}/{array_column}/bindings/{entity}`, 4a.1/#954 — never `assign` or `save_ledger`), every ledger of a BKCC-declared source re-written (4d.1), ledger YAMLs (closed bindings via `backbone_assign_source_to_entity` — **declared BK stamped at bind time, #582**, open via `backbone_auto_configure_sources`, `backbone_save_ledger` for primary + filter overrides + foreign-key relationship_key columns; **deviation-only `metadata_overrides` block written directly onto the ledger YAML, 4e/#615**), body YAMLs (via `backbone_stamp_body_config`), build artefacts (via `backbone_start_build`) |
 
 The declared business key is stamped on the **first** ledger write via
 the `business_keys` argument to `backbone_assign_source_to_entity`
@@ -59,7 +59,7 @@ execution immediately and surfaces a message naming the next command:
 | **G1** (2b, #971) — a plan `name:` resolves to no registered source or schema | *"Source `<name>` in the plan is not a known system for `{tid}`. Register it (see `/backbone-plan` step 3.5), then re-run `/backbone-plan {tid}`."* Stop — before any write. Record the #658 finding with `source: loop1/apply-2b-prereq`. |
 | **G2** (2b, #971) — a plan entity's `core_ref` resolves `not_found`, and core does not hold it (no `fault`) | *"Concept `<core_ref>` is in neither `{tid}`'s ontology library nor core. Author it (see `/backbone-plan` step 3.5), then re-run `/backbone-plan {tid}`."* Stop — before any write. Record the #658 finding with `source: loop1/apply-2b-prereq`. |
 | **G2 service fault** (2b, BB-1309) — the resolve returns `not_found` with `fault: tenant_library_missing_core_concept`, or the error `core_ontology_unavailable` | *"Concept `<core_ref>` is a core concept, but the service could not resolve it for `{tid}` (`<fault or error>`). This is a service fault, not a missing concept: do not author it. Report it to the Backbone team, then re-run `/backbone-apply {tid}` once it is fixed."* Stop — before any write. Never suggest authoring: it would copy a core concept into the tenant. Record the #658 finding with `source: loop1/apply-2b-prereq`. |
-| G3 (2b, #971) — a plan-bound source has `loader: null` | Report one line naming `/backbone-plan` step 3.5 as the remedy and **continue** — never blocking (#958 D8, rule 8). |
+| G3 (2b, #971) — a plan-bound source has `loader: null` | *"`<source>` has no loader assigned — assign one at `/backbone-plan` step 3.5, then re-run `/backbone-plan {tid}`."* Stop — before any write. Blocking since BB-1354 (ADR-0049; rule 8). |
 | One `(source, table)` bound to two entity slugs **and** one of those bindings declares `foreign_keys[].target` equal to the other slug (2, ADR-0032 clause (b)) | *"`<source>.<table>` is bound to `<slug-b>` as a hub AND references `<slug-b>` by `foreign_keys:` from its `<slug-a>` binding — the plan itself says `<slug-b>` is coarser than the row. A coarser entity is a foreign key, never a second hub binding (ADR-0003 clause (b), kept by ADR-0032). Remove the `<slug-b>` binding for this table and re-run `/backbone-plan {tid}`."* Stop. (A plain double-binding with no such contradiction is **accepted** — see step 2.) |
 | `backbone_stamp_body_config` (6) or `generate-scaffolding` returns **409 `INPUT_YAML_ENTITY_COLLISION`** | Rare since #806 slice 2 (input YAMLs are entity-scoped, `input_<source>_<table>__<entity>.yaml`, so two bindings never share a file). It now means a **legacy un-suffixed** `input_<source>_<table>.yaml` is still owned by a different live binding, or a hand-edited `domain:` disagrees with the file's own entity. Surface the message verbatim, then: *"Re-run Build Configuration (`backbone_stamp_body_config`) for `<source>.<table>` → `<other-slug>` so it migrates to its own file, then retry."* Nothing was overwritten. Stop. |
 | `backbone_assign_source_to_entity` returns `failed > 0` or `404` (4a) | *"Closed binding failed for `<source>.<table>` → `<entity>`: `<reason>`. Fix the binding in `design_plan.md` and re-run `/backbone-plan {tid}`."* |
@@ -86,10 +86,17 @@ execution immediately and surfaces a message naming the next command:
 | A 4d.1 re-write of a BKCC-declared source's ledger returns non-200 | Surface verbatim, naming the ledger. Stop **before** step 6 — the source is now half-scoped, and plan-contract rule 4 will refuse it until every one of its ledgers is re-written. Re-running `/backbone-apply {tid}` repairs it (3c is idempotent and 4d.1 re-writes whatever still differs). |
 | `backbone_save_ledger` returns 422 with `INVALID_SOURCE_FILTER` | *"Source filter for `<source>.<table>` failed Snowflake parse: `<snowflake_error>`. Fix the `filter:` value in `design_plan.md` and re-run `/backbone-plan {tid}`."* Stop. |
 | `foreign_keys[].target` not a slug declared in the plan (5c) | *"Foreign key on `<source>.<table>` targets `<target>`, which is not an entity in the plan. Add the entity or fix the FK via `/backbone-plan {tid}`."* Stop. |
-| Plan-contract gate returns `blocking > 0` (step 2 / after 4d.1 / after 5c — #798 rule 1, #619 5b rule 2, #840 rule 4, #960 rules 4b and 5, #975 rule 9 C1–C5, #1053 rule 9 C0) | *Surface each finding's `message` verbatim — a rule-1 finding names the entity, source, table, the absent column and the columns that do exist; a rule-2 finding names the FK, its `fk_to_table` and which evidence source failed (or the ledger's recorded `fk_to_column_gap`); a rule-4 (`bkcc_consistent_within_source`) finding names the source, the entity and every binding, grouped by what each ledger gives that entity's keys; a rule-4b (`bkcc_entity_scope_agrees_across_sources`) finding names the entity and every source that keys it, scoped and unscoped; a rule-5 (`bkcc_scoped_entity_is_bound`) finding names the source and the scoped-but-unbound entity, with both remedies; a rule-7 (`dck_binding_is_uow`) finding names the binding that declares a `dck:` while not being a unit-of-work line, and a rule-7 (`dck_not_a_foreign_key`) finding names a `dck:` that collides with one of the binding's own foreign keys — both blocking, both a plan edit (#959).* Then: *"Fix the plan via `/backbone-plan {tid}` and re-run."* (Rule 4 at the step-2 entry gate is the one exception — see step 2: for a source the plan's `source_bkcc:` declares, it is repaired by 3c + 4d.1 and judged at the post-4d.1 re-run. Rules 4b and 5 are never deferred: no re-write repairs them.) Stop — before any write tool at step 2; before step 6 on the post-5c re-run. |
+| Plan-contract gate returns `blocking > 0` (step 2 / after 4d.1 / after 5c — #798 rule 1, #619 5b rule 2, #840 rule 4, #960 rules 4b and 5, #975 rule 9 C1–C5, #1053 rule 9 C0) | *Surface each finding's `message` verbatim — a rule-1 finding names the entity, source, table, the absent column and the columns that do exist; a rule-2 finding names the FK, its `fk_to_table` and the `fk_to_column` the plan states (or the ledger's recorded `fk_to_column_gap`, `not_stated_in_plan` when the plan states none); a rule-4 (`bkcc_consistent_within_source`) finding names the source, the entity and every binding, grouped by what each ledger gives that entity's keys; a rule-4b (`bkcc_entity_scope_agrees_across_sources`) finding names the entity and every source that keys it, scoped and unscoped; a rule-5 (`bkcc_scoped_entity_is_bound`) finding names the source and the scoped-but-unbound entity, with both remedies; a rule-7 (`dck_binding_is_uow`) finding names the binding that declares a `dck:` while not being a unit-of-work line, and a rule-7 (`dck_not_a_foreign_key`) finding names a `dck:` that collides with one of the binding's own foreign keys — both blocking, both a plan edit (#959).* Then: *"Fix the plan via `/backbone-plan {tid}` and re-run."* (Rule 4 at the step-2 entry gate is the one exception — see step 2: for a source the plan's `source_bkcc:` declares, it is repaired by 3c + 4d.1 and judged at the post-4d.1 re-run. Rules 4b and 5 are never deferred: no re-write repairs them.) Stop — before any write tool at step 2; before step 6 on the post-5c re-run. |
 | Plan-contract gate returns a rule-6 (`bkcc_link_scope_gap`) finding, `info` severity (#960) | Surface the `message` verbatim and **continue** — a binding whose own entity is unscoped while an entity it keys is scoped emits an unscoped link key. Legal and often intended (#960 D7 Rule B); the remedy is a plan answer, not an apply-time repair. Never blocking. |
 | Plan-contract gate returns a rule-9 (`prejoin_carry_resolvable`) **C6** or **C7** finding, `advisory` severity (#975) | Surface the `message` verbatim and **continue** — C6: a carried column is the parent's own business key, already fetched as the key (suggest removing it at the next `/backbone-plan`); C7 (post-5c only): the binding's carries differ from its satellite's `carried` map in the frozen vault contract, so that incremental satellite needs a **full refresh** (#780) before the carried column reaches (or leaves) the table, re-stamping its history with the parent's current values. Repeat every C7 in the step-9 summary as *"full refresh needed for `<satellite>`"*. Never blocking: the operator decides when to refresh. See step 5c, *Rule 9 — report C1–C7 verbatim*. |
-| Plan-contract gate returns a rule-8 (`source_has_loader_binding`) finding, `info` severity (#958) | Surface the `message` verbatim and **continue** — a registered source names no `loader:`, so no loader profile resolves and its bindings take no default loader-metadata exclusion (loader plumbing left in a satellite hashdiff re-versions the satellite on every re-land). Legal and live: a source with no `loader:` and a working `metadata_overrides.ldts` builds correctly, so refusing it would refuse an apply that works (#958 D8). Name both remedies — register a loader (`POST /api/config/{tid}/loaders`) or declare `metadata_overrides.metadata_columns` per binding (v1.10). **Name no column**: this gate cannot prove which columns are loader plumbing, and guessing from a name is what #958 G1 refuses. Never blocking. |
+| Plan-contract gate returns a rule-8 (`source_has_loader_binding`) finding, `blocking` (#958, BB-1354) | Surface the `message` verbatim and **stop** — a source this plan binds names no `loader:` (a registered source the plan does not bind is not judged). Every planned source has a loader (ADR-0049); the remedy is `/backbone-plan` step 3.5's L row (`POST /api/config/{tid}/loaders`). **Name no column**: this gate cannot prove which columns are loader plumbing, and guessing from a name is what #958 G1 refuses. |
+| Plan-contract gate returns `excluded_column_carried_by_flatten`, `advisory` severity (BB-1073) | Surface the `message` verbatim and **continue** — a plan `flattens:` entry on the binding's table flattens or carries a column the binding excludes, so the binding the flatten feeds can still hold that data. Ask the operator to check it at the next `/backbone-plan`. Never blocking. |
+| Plan-contract gate returns `excluded_column_stated_metadata`, `advisory` severity (BB-1073 with BB-1419) | Surface the `message` verbatim and **continue** — the binding tags a column under `metadata:` that it also excludes. The tag has no effect while the column is excluded; 5f still writes it, so a later release brings the column back with it. Never blocking. |
+| Plan-contract gate returns `excluded_column_in_transform`, `advisory` severity (BB-1073) | Surface the `message` verbatim and **continue** — a `transforms[].expr` of the binding reads a column it excludes (matched on the whole token), and the derived column is not excluded, so a derived column can still carry the excluded data. Ask the operator to check it at the next `/backbone-plan`. Never blocking. |
+| Plan-contract gate returns `excluded_column_enters_satellite`, `advisory` severity (BB-1073) | Surface the `message` verbatim and **continue** — the binding's ledger keeps a column out of every satellite (`target: __excluded__`) that the plan does not list under `excluded_columns`, so step 5g releases it to `main`: the column comes back into the satellite, its hashdiff changes and it needs a **full refresh** (#780). This brings back data someone chose to keep out: ask the operator whether it belongs in the plan's `excluded_columns` before the next apply. For a **key** column whose `excluded: true` the plan no longer lists (shape `excluded_key_enters_satellite`) the business-key copy comes back, with no history for earlier rows. Shape `excluded_column_dropped` is different: apply added the column only to exclude it and the plan names it nowhere else, so 5g drops it from the ledger and it enters no satellite (the stamp reports it in `new_source_columns`); no refresh is needed. A **CHECKPOINT**, not a stop: repeat it in the step-9 summary. Judged before the 5g write, so read it from the **step-2** call. |
+| Plan-contract gate returns `excluded_column_leaves_satellite`, `advisory` severity (BB-1073) | Surface the `message` verbatim and **continue** — a column the plan now excludes is in a satellite today (by the binding's ledger or its body). Dropping it changes that satellite's hashdiff, so an incremental run would version every key: the satellite needs a **full refresh** (#780), and where the landing keeps only current rows that refresh loses the satellite's earlier versions. For a **key** column (shape `excluded_key_leaves_satellite`) the hashdiff is unchanged but the satellite drops the key's business-key copy, so the column set changes and it still needs the refresh; the business vault loses `bk__<col>`. A **CHECKPOINT**, not a stop: repeat it in the step-9 summary. Judged before the 5g write, so read it from the **step-2** call. Never run the refresh yourself. |
+| Plan-contract gate returns `plan_carries_unverified`, `blocking` (BB-1354) | Surface the `message` verbatim and **stop** — a binding carries an ADR-0030 `unverified:` block, which v1.18 retired. Re-run `/backbone-plan {tid}` (its "Cutover re-plan" for a plan written before BB-1354). Apply never settles one. |
+| Plan-contract gate returns `plan_written_by_plan_store`, `blocking` (BB-1354) | Surface the `message` verbatim and **stop** — the plan on disk has no plan record (`configs/design_plan.checked.yaml`), or its `## Plan` fingerprint differs from the record's: it was written or edited outside the plan store. Re-run `/backbone-plan {tid}`. There is no override. |
 | Plan-contract gate returns a `binding_resolves_ldts` finding, shape `ldts_unresolved`, `blocking` (step 2, BB-1220) | Surface the `message` verbatim and **stop** — the bound table resolves no load date: its source's loader supplies no `ldts` (or the source names no `loader:`) and the plan gives the binding no `metadata_overrides.ldts`, so its staging model would have a blank `ldts` and the dbt project would not parse. The remedy is the plan's: re-run `/backbone-plan {tid}` to add `metadata_overrides.ldts` (a load-time column of the table, or `current_timestamp`) with `ldts_override_reason`. Never default it (ADR-0009). See step 4e item 3. |
 | Plan-contract gate returns a `prejoin_binding_resolvable` finding, shape `prejoin_table_carries_no_key` or `prejoin_table_carrier_ambiguous`, `blocking` (step 2, BB-1220, ADR-0034 amendment) | Surface the `message` verbatim and **stop** — a foreign key with `fk_to_table` names a table that is not bound to its `target`, so the prejoin reads the one binding on that table that carries a direct key (no `fk_to_table`) to the target (a pass-through prejoin). `prejoin_table_carries_no_key`: no binding there carries one, so the view it would read is never generated. `prejoin_table_carrier_ambiguous`: several do, and the platform does not pick one. Re-run `/backbone-plan {tid}` to bind the table to the target, leave one carrying binding, or drop `fk_to_table` so the key is direct. |
 | Plan-contract gate returns a rule-10 (`link_fk_drift`) **LK1** or **LK2** finding, `advisory` severity (#1136) | Surface the `message` verbatim and **continue** — a unit-of-work binding's foreign keys differ from the hash keys its link carries in the frozen vault contract. The link is incremental and dbt's `merge` takes its column list from the existing table: **LK1** (a foreign key removed) makes the next `dbt run` fail with `invalid identifier 'HK_<TARGET>_H'`; **LK2** (a foreign key added) runs green but never writes the new key. A **CHECKPOINT**, not a stop: the plan change is legitimate, and the table needs one deliberate schema step before the next run — LK1: drop the column from the existing link tables (keeps every row) or full-refresh the link; LK2: full-refresh the link. Repeat each in the step-9 summary. Never run the DDL or the refresh yourself. |
@@ -108,10 +115,10 @@ execution immediately and surfaces a message naming the next command:
 | `transforms[].as` is a NEW column WITHOUT a `role:` (neither `business_key` nor `attribute`) (5e) | *"Hard-rule transform `as: <as>` on `<source>.<table>` names a column not found in the ledger. An override must name an existing scanned column; a derive (a new synthetic column) must declare `role: business_key` or `role: attribute`. Fix it via `/backbone-plan {tid}`."* Stop. |
 | `transforms[].expr` of a derive is out-of-boundary (window / aggregate / subquery / cross-table) (5e) | *"Derived <business key\|attribute> `as: <as>` on `<source>.<table>` has an out-of-boundary expression — a derive is restricted to scalar natural source columns (COALESCE / concat / CASE / CAST), no window / aggregate / subquery / cross-table (ADR-0013 decision 3, no widening). Fix it via `/backbone-plan {tid}`."* Stop. |
 | `transforms[].expr` or `transforms[].as` missing/empty (5e) | *"Hard-rule transform on `<source>.<table>` is missing a required field (`as`/`expr`). Fix it via `/backbone-plan {tid}`."* Stop. |
+| Plan-contract gate returns `excluded_columns_valid`, `blocking`, or a rule-1 `column_absent` on field `sources[].excluded_columns` (step 2, BB-1073) | Surface each `message` verbatim and **stop** — before any write tool. The binding's `excluded_columns` is malformed, sits on an open or a flatten-fed binding, lists a column twice, lists a column `metadata_overrides.metadata_columns` also lists (`excluded_column_is_metadata`), lists a column `include_columns:` also lists (`excluded_column_included`), lists the load timestamp or batch id column (`excluded_column_is_load_stamp`) or a satellite system name, `LDTS` / `RSRC` (`excluded_column_is_system_name`), or names a column the table does not have (scan columns plus `transforms[].as`). *"Fix the binding's `excluded_columns` via `/backbone-plan {tid}`."* |
+| Step 5g's mutation reports a listed column `missing` from the materialised ledger (5g, BB-1073) | *"Excluded column `<column>` not found on `<source>.<table>`'s ledger, scan columns or `transforms[].as`. Fix the `excluded_columns` entry via `/backbone-plan {tid}`."* Stop. A column a sparse ledger lacks that **is** a scan column or a `transforms[].as` is not `missing`: 5g adds it excluded (`added`). Not reachable from a plan that passed step 2 unless the table changed since it was scanned. |
 | `backbone_save_ledger` returns any other non-200 | Surface verbatim. Stop. |
-| A resolved loader-metadata column (`ldts`/`etl_runid` override-else-default; `smdt` **only when the plan declares one** — it has no loader default, #771) is absent from the profiled/scanned schema (4e, #615) | *"Loader metadata field `<field>` for `<source>.<table>` resolves to column `<COL>`, which does not exist on the landed table. Re-run `/backbone-plan {tid}` to resolve the metadata gap (designate a real column, or accept a reason-stamped `current_timestamp`)."* Stop. |
-| A resolved **load-bearing** loader-metadata column (`ldts`/`etl_runid`) is present but **100% NULL** on the profiled table (4e, #772) | *"`ldts: <COL>` is NULL in `<n>/<n>` rows of `<SCHEMA>.<TABLE>` — choose another load timestamp. Re-run `/backbone-plan {tid}` to designate a populated load timestamp."* Stop. (`smdt` is excluded — inert and nullable by design. A partially-NULL column is logged, not blocked. A zero-row table is not a finding.) |
-| `backbone_stamp_body_config` returns **422** naming a carry whose binding's `main` satellite is excluded (6, #975 `CarryHasNoSatelliteError`) | Surface the `detail` verbatim — it names the binding. The operator excluded that binding's main satellite grouping in the Source Explorer, and a carry lands only in the main satellite, so there is nowhere to put it. Not a plan defect the gate can see (the exclusion lives only in the saved mapping cache): stop, and name both remedies — re-include the main satellite in the Source Explorer, or remove the carry via `/backbone-plan {tid}`. |
+| A resolved loader-metadata column (`ldts`/`etl_runid` override-else-default; `smdt` **only when the plan declares one** — it has no loader default, #771) is absent from the table's scan columns (4e, #615) | *"Loader metadata field `<field>` for `<source>.<table>` resolves to column `<COL>`, which does not exist on the landed table. Re-run `/backbone-plan {tid}` to resolve the metadata gap (designate a real column, or accept a reason-stamped `current_timestamp`)."* Stop. |
 | `backbone_stamp_body_config` returns an error | Surface the error verbatim. Stop. |
 | `backbone_start_build` errors | Surface the error verbatim. Stop. |
 | The build (step 8) ends `error` with an error naming `[#1076]` — a link whose own or foreign hash keys its staging model does not compute | Surface each `[#1076]` error verbatim — it names the link, the staging model and the missing key(s). The link would load degenerate (every owner row collapses onto one relationship), so the build refuses it: terminal status `error`, nothing compiled or deployed. Remedy: *re-run `/backbone-apply {tid}` so step 5c writes the role-qualified foreign key (`target: <played_by>, role: <role>`)*, or fix the binding's ledger (its `relationship_key` `target`/`role`) and re-run. **Never edit the generated SQL** — the next build regenerates it. Stop. |
@@ -138,7 +145,7 @@ Order is fixed and **the failure is never masked**:
    write does not alter, delay, or replace it.
 2. **THEN** best-effort `POST /api/tenants/{tid}/design-plan/findings`
    with a single finding for the stop (mirrors how this skill already
-   calls REST directly, e.g. `profile-table-cached`):
+   calls REST directly, e.g. the plan-contract gate):
 
    ```json
    {
@@ -490,18 +497,17 @@ and read `blocking` / `advisory` / `info`.
 - `advisory > 0` → surface, do **not** stop. Filter-clause identifiers are
   extracted approximately; the authoritative filter check is `save_ledger`'s
   Snowflake round-trip in step 5b (422 `INVALID_SOURCE_FILTER`).
-- `info > 0` → log. A binding with no profile and no scan columns is unchecked,
-  not wrong (#612/#615's subject).
+- `info > 0` → log. A binding with no scan columns is unchecked, not wrong
+  (#612/#615's subject); re-scan the source to decide it.
 
 The gate carries these rules — the list grows, so it is named rather than counted. **Rule 1** (#798) — a `bk` / `foreign_keys[].column`
-must exist on the table. **Rule 2** (#619 5b) — a **declared prejoin**
-(`foreign_keys[].fk_to_table` set) must have a join column apply can resolve:
-a relationship-scan edge for `(table, column)` pointing at `fk_to_table`, or
-`fk_to_table`'s deep-profile primary key. Evidence present and unresolvable →
-blocking (the message names which source failed); neither evidence source →
-`info`, decided on the re-run after 4d.1. FKs without an explicit `fk_to_table`
-are not judged here — 5c decides them, and the re-run after 5c judges them
-ledger-backed. **Rule 3** (#806 slice 4, `source_filter_reaches`) — a top-level
+must exist on the table. **Rule 2** (#619 5b, v1.18) — a **declared prejoin**
+(`foreign_keys[].fk_to_table` set) states `fk_to_column`, the column of
+`fk_to_table` it joins to, and that column must be on the target's scan columns
+with a key-eligible type. No `fk_to_column`, an absent column or a
+semi-structured one → blocking; a target table missing from the scan → `info`.
+FKs without an explicit `fk_to_table` are not judged here — 5c decides them, and
+the re-run after 5c judges them ledger-backed. **Rule 3** (#806 slice 4, `source_filter_reaches`) — a top-level
 `source_filters[]` declaration must reference columns that exist on every table
 in the source it reaches: blocking for a table bound in this plan (its landing
 view would not compile), advisory for an unbound one and for a `table_filters`
@@ -529,28 +535,29 @@ declare it `global`) and both are plan edits. **Rule 6** (#960,
 it keys is scoped emits a link key with no code, so two instances of one source
 merge their link rows. **`info`, never blocking**: the shape is legal and
 declared (#960 D7 Rule B). Surface it and continue. **Rule 8** (#958,
-`source_has_loader_binding`) — a registered source that names no `loader:`
+`source_has_loader_binding`) — a source the plan binds that names no `loader:`
 resolves no loader profile, so its bindings take no default loader-metadata
 exclusion and the loader's own columns stay in the satellite hashdiff,
-re-versioning the satellite on every re-land of unchanged rows. **`info`, never
-blocking** (#958 D8): the shape is legal and live — a source with no `loader:`
-and a working `metadata_overrides.ldts` builds correctly, so a refusal would
-stop an apply that works for the sake of a missing optimisation. The message
-names both remedies (register a loader via `POST /api/config/{tid}/loaders`, or
-declare `metadata_overrides.metadata_columns` per binding at v1.10) and **names
-no column** — this site reads ledgers and registrations, not warehouse columns,
+re-versioning the satellite on every re-land of unchanged rows. **Blocking**
+since BB-1354 (ADR-0049, reversing #958 D8): every planned source has a loader.
+The remedy is a loader assignment at `/backbone-plan` step 3.5
+(`POST /api/config/{tid}/loaders`), and the message **names no column** — this site reads ledgers and registrations, not warehouse columns,
 so it cannot prove which are the loader's plumbing, and a guess from a column's
-name is the inference #958 G1 refuses. Surface it verbatim and continue; do not
-add candidate column names of your own. **Rule 9** (#975,
+name is the inference #958 G1 refuses. Surface it verbatim and stop; do not
+add candidate column names of your own. **`plan_carries_unverified`** (BB-1354) —
+a binding carries a retired `unverified:` block: blocking, re-plan.
+**`plan_written_by_plan_store`** (BB-1354, estate scope) — the plan has no plan
+record or its fingerprint differs from the record's: blocking, re-plan, no
+override. **Rule 9** (#975,
 `prejoin_carry_resolvable`) — every `foreign_keys[].carry` must ride an
 explicit, bound prejoin and name real, non-metadata parent columns under names
-that cannot collide. Its findings are **C0–C7**, each message prefixed with its
+that cannot collide. Its findings are **C0–C7** and **C16**, each message prefixed with its
 id (`C3: …`); they are listed with what each means and its remedy under
 **Rule 9 — report C1–C7 verbatim** in step 5c. **C0** (#1053,
 `prejoin_key_transformed`) is judged for **every** FK, carry or not: a stated
 prejoin (`fk_to_table`, or a `carry`, which needs one) on a column that is a
 `transforms[].as` of the same binding is blocking. Here, at entry, the **plan**
-variant judges C1–C6 over the plan text: a blocking C1/C2/C3/C4/C5 stops before
+variant judges C1–C6 and C16 over the plan text: a blocking C1/C2/C3/C4/C5/C16 stops before
 any write, like every other rule; a C3 `info` (no inventory for the parent
 table yet) is decided by the post-4d.1 re-run. **C7 is ledger-only** and cannot
 fire meaningfully before 5c has written this plan's carries. A plan with no
@@ -681,15 +688,16 @@ future UI, or a re-plan after an `## Apply-time findings` section. The schema
 rules below are still validated by this skill; the gate is what holds when this
 skill is not the reader.
 
-**Re-run the gate after step 4d.1.** 4d profiles every bound table, so the second
-call judges against the deep profile rather than the scan — the same endpoint,
-better evidence. Any binding that came back `info` at entry is decided there. It
-runs after 4d.1 rather than straight after 4d because `assign` does not re-write
+**Re-run the gate after step 4d.1.** The second call judges the ledgers this
+run has just written, against the same scan evidence (apply profiles nothing,
+BB-1419): a binding that came back `info` at entry stays `info` until the source
+is re-scanned. It runs after 4d.1 rather than straight after 4c because `assign`
+does not re-write
 a ledger that already exists: until 4d.1 re-writes them, a declared source's
 pre-existing ledgers still carry the old collision code, and rule 4 would refuse a
 state this run is about to repair.
 
-#### Plan schema (v1.17)
+#### Plan schema (v1.19)
 
 ```yaml
 entities:
@@ -705,10 +713,13 @@ entities:
       - name: <UPPERCASE>             # required
         tables: [<UPPERCASE>, ...]    # optional; absent → open binding
         primary: <UPPERCASE>          # v1.1; required when len(tables) > 1
-        bk: <UPPERCASE>               # declared BK column; #582 — required on
-                                      # hub-forming closed bindings (uow lines
-                                      # w/ foreign_keys are exempt). Stamped at
-                                      # bind time via assign's business_keys arg.
+        bk: <UPPERCASE> | [<UPPERCASE>, ...]
+                                      # declared BK column, or (v1.18) a list for
+                                      # a composite key, in hash order; #582 —
+                                      # required on hub-forming closed bindings
+                                      # (uow lines w/ foreign_keys are exempt).
+                                      # Stamped at bind time via assign's
+                                      # business_keys arg, in the plan's order.
         filter: "<WHERE-clause>"      # v1.1; optional double-quoted scalar
         foreign_keys:                 # v1.2; optional — line/event table FKs
           - column: <UPPERCASE>       # FK column on the bound table
@@ -742,6 +753,11 @@ entities:
           - column: <UPPERCASE>       # column on this uow line holding another line's DCK
             target: <lowercase-slug>  # a uow line with a `dck:`, bound from THIS source.
                                       # No link is built: the column stays an attribute
+        excluded_columns: [<UPPERCASE>, ...]
+                                      # v1.19; optional (BB-1073) — columns of the bound
+                                      # table that enter NO satellite (payload or hashdiff).
+                                      # Staging still reads them; a key hashed from one
+                                      # still works. Closed, non-flatten-fed bindings only
         metadata_overrides:           # v1.3; optional — deviation-only loader-metadata (#615)
           ldts: <COLUMN | expression>           # optional deviation
           smdt: <COLUMN | expression>           # optional INCLUSION (#771): no loader default exists;
@@ -778,11 +794,6 @@ entities:
             min_share: <0 < x <= 1>   # optional, default 0.5
           parent: <lowercase-slug>    # a uow line follows its parent: one of foreign_keys[].target
           reason: "<sentence>"        # required for undetectable unless parent is set
-        unverified:                   # v1.5; optional — deferred plan-time checks (ADR-0030)
-          - reason: [<reason>, ...]   # closed set: table_never_examined |
-                                      # guessed_load_method | contents_never_examined |
-                                      # warehouse_unreachable
-            note: "<operator sentence>"  # the reason's canonical sentence, quoted
 
 source_filters:                       # v1.6; optional TOP-LEVEL list (#806 slice 4, ADR-0033)
   - name: <UPPERCASE>                 # required; the source system, not the schema
@@ -842,7 +853,9 @@ the field and YAML line:
   custom).
 - `sources` is a list (may be empty when `status: forward-looking`).
 - Each source has `name` (uppercase). `tables` if present is a list
-  of uppercase strings. `bk` if present is a single uppercase string.
+  of uppercase strings. `bk` if present is a single uppercase string, or
+  (v1.18) a list of two or more uppercase strings for a composite key, in the
+  order its columns are hashed.
 - **v1.1 — `primary`:** required when `len(tables) > 1`; forbidden
   otherwise (single-table bindings have implicit primary). When
   present, `primary` MUST be one of the strings in `tables`.
@@ -1045,24 +1058,9 @@ the field and YAML line:
   - `reason` — required, non-empty string.
   - `tested` — optional; the plan-time evidence stamp, carried through.
   Translation to a ledger `transform` happens in **step 5e**.
-- **v1.5 — `unverified`:** optional list of deferred plan-time checks
-  (ADR-0030). When
-  present, the binding MUST also carry `tables:` (an annotation is per bound
-  table). Keys per entry: only `reason` / `note` are permitted — any other key →
-  **HARD ERROR**.
-  - `reason` — required, a non-empty list of strings drawn from the closed set
-    `table_never_examined`, `guessed_load_method`, `contents_never_examined`,
-    `warehouse_unreachable`. Any other value → **HARD ERROR** (redirect to
-    `/backbone-plan`): a fifth reason is a defect to card, never a value to
-    accept.
-  - `note` — required, non-empty string. Carried verbatim; never rewritten.
-
-  **Absence of the block is a positive claim** — a binding with no `unverified:`
-  was fully confirmed at plan time. **Settling** these obligations (4d/4e, the
-  live checks, and the `DEFERRED_CHECK_FAILED` 422) is ADR-0030 §7 and ships in
-  its own slice; until then this executor **accepts and carries** the block
-  unchanged — it must never reject it as an unknown key, and must never treat an
-  annotated binding as verified.
+- **v1.5 — `unverified`:** **retired in v1.18** (ADR-0049 supersedes ADR-0030).
+  A binding carrying an `unverified:` block is refused at the read site
+  (`plan_carries_unverified`, blocking: re-plan). Apply never settles one.
 - **v1.6 — `source_filters`:** optional **top-level** list of source-grain
   filter declarations (ADR-0033,
   kanban #806
@@ -1170,14 +1168,12 @@ the field and YAML line:
 
 **Backwards compatibility:** plans written before v1.1 (no `primary` /
 `filter`), before v1.2 (no `foreign_keys`), before v1.3 (no
-`metadata_overrides`), before v1.4 (no `transforms`), and before v1.5 (no
-`unverified`) remain valid. The executor's defensive read in the consumer
+`metadata_overrides`) and before v1.4 (no `transforms`) remain valid. The executor's defensive read in the consumer
 services (#552 commit 5) falls back to the legacy heuristic / loader profile
 when a field is absent; a binding with no `metadata_overrides` inherits the
 loader profile exactly as v1.2, and a binding with no `transforms` carries no
 field-level hard rule (every column lands as its bare value) exactly as v1.3.
-A binding with no `unverified` block asserts every plan-time check completed,
-exactly as v1.4. A plan written before v1.6 has no `source_filters:` section:
+A plan written before v1.6 has no `source_filters:` section:
 every filter is then a binding origin and resolves to itself byte-for-byte,
 exactly as v1.5. A plan written before v1.7 has no `source_bkcc:` section: no
 declaration is written and no ledger is re-written for BKCC; a source with no
@@ -1279,6 +1275,75 @@ gains the key, no status-tracking satellite is rendered, and every binding is
 reported `undetectable`. Absence is the pre-v1.17 behaviour, so no plan is re-run
 for it.
 
+- **v1.18 — `fk_to_column`, a `bk:` list, no `unverified` (BB-1354, ADR-0049,
+  ADR-0053):**
+  - `foreign_keys[].fk_to_column` — required on every prejoin (an entry with
+    `fk_to_table`). The plan states it and the contract judges it: rule 2
+    (`prejoin_join_resolvable`) refuses a prejoin without one, or whose column
+    is not on the target's scan columns or not key-eligible. Step 5c copies
+    the plan's value onto the ledger (BB-1419): nothing resolves it, so the
+    advisory `ledger_fk_to_column_matches_plan` fires only for a ledger written
+    before BB-1419 or edited by hand, and the build joins on the ledger's value.
+  - `bk` — a single column, or a **list** for a composite key, in the order its
+    columns are hashed. Write the ledger's business-key columns **in that
+    order**: the stamp hashes them in ledger order, and nothing reads the order
+    from a profile or the mapping cache.
+  - `unverified` — refused (`plan_carries_unverified`).
+  - `metadata: {COLUMN: amt | dt | none}` and `include_columns: [COLUMN]`
+    (BB-1419) — a column's stated amount / date tag, compiled at step 5f, and a
+    scanned column a binding's existing ledger lacks, brought in at step 4f.
+
+**v1.17 → v1.18 is not backwards compatible, deliberately.** A plan written
+before v1.18 has no plan record, may carry `unverified:` blocks and states no
+`fk_to_column` on its prejoins, so the read site refuses it
+(`plan_written_by_plan_store`, `plan_carries_unverified`, rule 2). The remedy is
+the cutover re-plan (`/backbone-plan`, "Cutover re-plan"), which starts from the
+plan on disk and keeps every live hash key's order.
+
+- **v1.19 — `excluded_columns` (BB-1073):** optional. A non-empty list of
+  UPPERCASE physical columns of the bound table that enter **no satellite**: not
+  the payload, not the hashdiff. Staging still reads each one, so a business key
+  or a foreign key's source column hashed from it still works. Judged at apply's
+  **read site** (ADR-0029), all before any write:
+  - rule 1 **`column_absent`** (blocking, field `sources[].excluded_columns`) — a
+    listed column the table does not have, judged against its scan columns plus
+    `transforms[].as`;
+  - **`excluded_columns_valid`** (blocking) — `excluded_columns_shape` (not a
+    non-empty list of plain identifiers), `excluded_columns_binding` (an open
+    binding, or a flatten-fed one), `excluded_column_duplicate` (a column listed
+    twice), `excluded_column_is_metadata` (also listed under
+    `metadata_overrides.metadata_columns`, which keeps it in the payload),
+    `excluded_column_included` (also listed under v1.18's `include_columns:`),
+    `excluded_column_is_load_stamp` (a column the binding's resolved `ldts` or
+    `etl_runid` expression reads: its value lands in every satellite's load-stamp
+    column; the `smdt` column and a loader `metadata_columns` entry may be
+    excluded), `excluded_column_is_system_name` (a column named `LDTS` or `RSRC`);
+  - **`excluded_column_carried_by_flatten`** (advisory) — a plan `flattens:` entry
+    on the binding's table reads an excluded column (array column or `carry:`), so
+    the binding it feeds can hold that data;
+  - **`excluded_column_stated_metadata`** (advisory) — a listed column v1.18's
+    `metadata:` also tags: the tag has no effect while it is excluded, and stays on
+    the ledger for a later release;
+  - **`excluded_column_leaves_satellite`** (advisory) — a listed column the
+    binding's ledger or body has in a satellite today: its hashdiff changes, it
+    needs a full refresh, and it loses history where the landing keeps only
+    current rows. Carried to the step-9 summary;
+  - **`excluded_column_enters_satellite`** (advisory) — its mirror, judged for
+    every closed, non-flatten binding: the ledger on disk has `target:
+    __excluded__` on a column the plan does not list, so 5g releases it and it
+    comes back into the satellite. Carried to the step-9 summary.
+  Written in **step 5g**, on every apply.
+
+**v1.18 → v1.19 is additive and backwards compatible.** A plan written before
+v1.19 declares no `excluded_columns`, so step 5g writes nothing, no ledger gains
+`target: __excluded__` from a plan, no body gains an `excluded:` flag, and the
+plan-contract gate emits exactly the findings it emitted at v1.18. Absence is the
+pre-v1.19 behaviour, so no plan is re-run for it. One change reaches a binding
+whose ledger already carries `target: __excluded__` from the retired Profile tab:
+step 5g re-derives exclusions from the plan, so a hand-set exclusion the plan does
+not list is released to the main satellite, and the gate says so first with
+`excluded_column_enters_satellite`. Put it in the plan to keep it.
+
 Invalid → hard error per the table. Stop.
 
 ### 2b. Apply prerequisites (gate) — BEFORE the first write (#971)
@@ -1324,13 +1389,11 @@ finding is a stop or a report. All REST calls go to `$BACKBONE` (step 0a).
      core. Author it (see `/backbone-plan` step 3.5), then re-run
      `/backbone-plan <tid>`."* Only here, a concept core does not hold, is
      authoring the remedy.
-- **G3 — a plan-bound source with no loader is reported, never blocking.** For
-  every source a plan binding resolves to whose registry entry has
-  `loader: null`, print one line: *"`<source>` has no loader assigned, so its
-  bindings take no default loader-metadata exclusion — assign one at
-  `/backbone-plan` step 3.5."* and **continue**. The shape is legal and live
-  (#958 D8, plan-contract rule 8, `source_has_loader_binding`), so refusing it
-  would refuse an apply that works. Name no column.
+- **G3 — a plan-bound source with no loader stops apply** (BB-1354,
+  ADR-0049; plan-contract rule 8, `source_has_loader_binding`, is blocking).
+  For every source a plan binding resolves to whose registry entry has
+  `loader: null`, print *"`<source>` has no loader assigned — assign one at
+  `/backbone-plan` step 3.5."* and stop before any write. Name no column.
 
 A G1 or G2 stop is recorded as a #658 finding with
 `source: loop1/apply-2b-prereq` (see *Record the hard-error as a finding*).
@@ -1643,7 +1706,7 @@ equals the plan `name` for a correctly-registered tenant — so the gate
 #### 4a. Closed bindings → `assign` (with declared BK at bind time, #582)
 
 **On hosted:** the hosted `backbone_assign_source_to_entity` takes the declared
-key as `identifier_columns` (`{TABLE: bk}`), not `business_keys`; everything
+key as `identifier_columns` (`{TABLE: bk}`, the `bk` string or list as the plan states it), not `business_keys`; everything
 else is the same call. End the stage with its receipt (step 0): print `commit_sha` and `push`.
 
 For each entity, for each `sources[]` binding **with `tables:`**:
@@ -1654,7 +1717,20 @@ with the correct `business_key: true` on its **first** write — there is
 no transient wrong-BK ledger and no separate override pass. Build the
 `business_keys` map (`{TABLE: bk}`) by applying the binding's `bk:` to
 every `TABLE` in `tables:`; omit the map entirely when the binding has
-no `bk:` (open inference handles those as a *suggestion*).
+no `bk:` (open inference handles those as a *suggestion*). A composite key
+(v1.18 `bk:` list) is passed **as the list, in the plan's order**: assign
+writes the ledger's business-key columns in that order, and the stamp hashes
+in ledger order (ADR-0053). Never sort or de-duplicate it.
+
+**BB-1419 — the table type is the binding's shape, passed on the first write.**
+A binding states no `table_type`, but its shape does, by the same rule 4a.1
+uses for a flatten: a binding with `bk:` forms a hub (`hub`); a binding with no
+`bk:` that declares `foreign_keys:`, `dck:` or `attaches_to:` is a uow line
+(`unit_of_work`). Pass it as `table_type`; omit it only when the binding states
+neither. It wins over the ontology heuristic, so a fresh tenant (no ledger, no
+profile) gets the plan's table type. Canonical rule:
+`app/utils/plan_binding_shape.binding_table_type`. The foreign-key and attach
+writes of step 5c pass the same value to `backbone_save_ledger`.
 
 ```python
 backbone_assign_source_to_entity(
@@ -1663,7 +1739,10 @@ backbone_assign_source_to_entity(
     table_names=<tables>,
     entity_domain=<slug>,
     business_keys={<TABLE>: <BK> for <TABLE> in tables} if bk else None,
+    table_type=<"hub" if bk else "unit_of_work" for a foreign_keys/dck/attaches_to line>,
 )
+# single key:    business_keys={"ORDERS": "ORDER_NUMBER"}
+# composite key: business_keys={"ORDER_LINES": ["ORDER_NUMBER", "LINE_NO"]}
 ```
 
 **Card #642 / ADR-0014 — role-qualified bind.** When the binding belongs to
@@ -1681,6 +1760,7 @@ backbone_assign_source_to_entity(
     entity_domain=<played_by>,                  # NOT the role slug
     role=<role>,                                # e.g. "contact"
     business_keys={<TABLE>: <BK> for <TABLE> in tables} if bk else None,
+    table_type=<the binding's table type, as above>,
 )
 ```
 
@@ -1843,44 +1923,13 @@ Do **NOT** proceed to body stamping until the gate passes. `missing_bk`
 gaps from #556 inference are NOT a gate failure — they surface as
 build-time validation later.
 
-#### 4d. Profile every bound table — the Stage-3 prerequisite `save_ledger` / `stamp` require (#608)
+#### 4d. (removed — apply profiles nothing, BB-1419 / ADR-0053)
 
-**On hosted:** profile with `backbone_profile_table(tenant_id, schema_name,
-table_name)`; the same gate holds, and a refusal stops. End the stage with its receipt (step 0): print `commit_sha` and `push`.
-
-**`save_ledger` (5b/5c) and `stamp_body_config` (6) both read the deep
-per-table profile cache** (`source_profiling/{schema}/{table}_profile.json`).
-`assign` / `auto_configure` do **not** create it (they scaffold the ledger
-from the scan + INFORMATION_SCHEMA), and `demo_reset 1` ships only the
-**scan** (`scan_results.json`), **not** the deep profiles. So `save_ledger`
-returns `404 "Profile not found for <schema>.<table>"` until the table is
-profiled. This is the UI's Stage-3 "Configure Sources" step
-(`prefetch-profiles`), which the agent path must perform explicitly.
-
-After the 4c gate confirms which tables are bound, profile **every** bound
-`(schema, table)` — resolve `schema` via the 4.0 source→schema map (same as
-4a). Call the **synchronous, cache-aware** profiling tool per table:
-`backbone_profile_table(tenant_id=<tid>, schema_name=<resolved schema>,
-table_name=<TABLE>)`.
-
-- **Synchronous + cache-aware:** returns when the profile is written;
-  already-profiled tables are a fast no-op. Prefer this over the UI's async
-  `POST /api/source-explorer/{tid}/prefetch-profiles` (202 + poll
-  `prefetch-status`) — in a batch you want each profile **confirmed written**
-  before `save_ledger`, not a background race.
-- **Gate:** do NOT proceed to 5b until every bound table profiled OK. A
-  non-200 here → surface verbatim and stop (a table that can't be profiled
-  can't be refined or stamped).
-- Tables with no 5b/5c refinement (pure hub bindings with BK already stamped
-  at 4a) still need a profile — `stamp_body_config` (step 6) reads it too. So
-  profile **all** bound tables, not just the ones carrying filter/FK.
-
-- **Skip every flatten-fed binding (#954).** Its `lndf_` view has no
-  `information_schema` row until it is built, its roster comes from the
-  declaration, and its write (4a.1) and stamp (6) read no profile. Profiling the
-  parent table on its behalf would record the **parent's** grain in a cache
-  keyed with no entity. (A table bound *ordinarily* by another binding is still
-  profiled for that binding.)
+This step used to deep-profile every bound table, because `save_ledger` and
+`stamp_body_config` read the profile cache. Neither does now: both compile from
+the plan's ledger and the source scan, so a tenant whose `source_profiling/`
+holds only `scan_results.json` applies and builds exactly as one with caches.
+Do not profile a table, and do not query its rows, at any step of apply.
 
 #### 4d.1 Re-write the kept ledgers of a BKCC-declared source — BEFORE the post-4d.1 gate (#840, #960)
 
@@ -1926,13 +1975,12 @@ Skip when the plan has no `source_bkcc:` section. Otherwise, for each source ste
    `backbone_save_ledger`:** split its `source_flatten` into the path, and send
    the ledger's own `table_type`, `columns` and — when present —
    `metadata_overrides` (omit `primary` and `source_filter`: omitted = kept).
-   `save_ledger` needs the parent's deep profile and writes caches at the
-   parent's grain (#954 OQ-4, ruled C).
+   `save_ledger` refuses a flatten-fed ledger with 422 (#954 OQ-4, ruled C).
 
    The writer re-resolves the source's declaration onto the ledger; the columns,
-   primary flag, filter origins and every other block round-trip unchanged. Needs
-   the deep profile, which is why this runs after 4d — a ledger of the source for a
-   table 4d did not profile (outside the plan) is profiled the same way first.
+   primary flag, filter origins and every other block round-trip unchanged. It
+   reads no profile, so a ledger of the source outside the plan is re-written the
+   same way.
    An entity the PUT answers but this ledger does **not** key is not a
    difference — the ledger is restricted on purpose and is not missing anything.
    An entity the ledger keys and the map does not answer is *undecided*, which
@@ -1955,10 +2003,8 @@ declared source even when the entry gate was clean.
 
 #### 4e. Resolve + validate loader metadata, persist deviations onto the ledger (#615 / ADR-0009)
 
-**On hosted:** the defaults come from `backbone_get_loader_metadata(tenant_id)`
-and the population check from `backbone_get_metadata_population(tenant_id)` (a
-`truncated: true` there means some bindings were not scanned: report them
-unchecked, never clean). Item 5 edits no file: persist the deviation block
+**On hosted:** the defaults come from `backbone_get_loader_metadata(tenant_id)`.
+Item 5 edits no file: persist the deviation block
 on the stored ledger with `backbone_amend_ledger(tenant_id, source, table,
 entity, amendment={"metadata_overrides": <the block>})`; it needs no ledger
 read first. An amendment without `metadata_overrides` keeps the block the
@@ -1971,7 +2017,7 @@ reads `ldts` / `etl_runid` from the loader profile **unless** the
 ledger carries a `metadata_overrides` block — the deviation-only per-table
 override the plan authored (B15 / step 4.7). This step resolves
 `field = override-else-loader-default` for every bound table, **validates**
-each resolved metadata column against the now-profiled schema, **fail-fasts**
+each resolved metadata column against the table's scan columns, **fail-fasts**
 on a still-absent column (apply is strict batch — never asks), and persists
 the plan's deviations onto the ledger so the stamp path honours them.
 
@@ -1983,8 +2029,8 @@ deviation). Absent `smdt` is the resolved, normal state: never a gap, never a
 hard error, nothing to gather in step 1 below. A *declared* `smdt` is validated
 exactly like the other two (steps 3–4) — a wrong `smdt` is worse than none.
 
-Run this **after 4d** (the table is profiled, so its real column inventory is
-available) and **before 5b/5c/6**. For each bound `(source, table, slug)`:
+Run this **after 4d.1** and **before 5b/5c/6**. The column inventory is the
+scan's (BB-1419: apply reads and writes no table profile). For each bound `(source, table, slug)`:
 
 1. **Gather the loader-profile defaults.** Read the binding's source
    registration from `{estate root}/{tid}/configs/schema_loader.yaml` — the
@@ -2026,9 +2072,9 @@ available) and **before 5b/5c/6**. For each bound `(source, table, slug)`:
    finding `binding_resolves_ldts` (shape `ldts_unresolved`, `blocking`),
    naming the source, table and entity. If one reaches this step, stop and
    re-run `/backbone-plan {tid}`. Never default it here (ADR-0009).
-4. **Validate each referenced column exists** in the table's profiled /
-   scanned schema (the deep profile written in 4d, or `scan_results.json`'s
-   per-table `columns[].COLUMN_NAME`, UPPERCASE). **Absent → HARD ERROR**:
+4. **Validate each referenced column exists** on the table's scan columns
+   (`scan_results.json`'s per-table `columns[].COLUMN_NAME`, UPPERCASE).
+   **Absent → HARD ERROR**:
 
    > *"Loader metadata field `<ldts|smdt|etl_runid>` for `<source>.<table>`
    > resolves to column `<COL>`, which does not exist on the landed table.
@@ -2041,41 +2087,9 @@ available) and **before 5b/5c/6**. For each bound `(source, table, slug)`:
    re-landed after planning, or the plan was hand-edited). It converts the
    opaque `dbt run` `invalid identifier` (#612) into a named, re-plan-able
    apply error.
-4b. **Validate each load-bearing column is POPULATED, not merely present
-   (#772).** Presence is not enough. `WAREHOUSE.STOCKLEVELS` was bound to
-   `ldts: LASTUPDATED`, NULL in 1376/1376 rows: the plan accepted it (the
-   column exists), step 4 above accepted it (presence, not population), the
-   staging view emitted `to_timestamp_tz(NULL)`, and the satellite **built
-   green once** before failing on every run since with
-   `252005: year 0 is out of range` — a connector fetch error dbt reports as
-   a *Compilation Error*, naming neither the column nor the table.
-
-   **This step is the authoritative gate for population**, and it is here
-   rather than only at plan time for a concrete reason: `scan_results.json`
-   carries `IS_NULLABLE` (a schema declaration), **not a null rate**, so the
-   plan often cannot answer the question. 4d has just written the deep
-   profile, so this step can.
-
-   Call `GET /api/validation/tenants/{tid}/metadata-population` and read the
-   findings for each bound table. Only **`ldts` and `etl_runid`** are checked
-   — `smdt` is inert and nullable by design (#771). Then:
-
-   - `severity: blocking` → **HARD ERROR** (apply is strict batch — never
-     asks). Surface the finding's `detail` verbatim; it already names the
-     binding, the column, and the null rate:
-
-     > *"`ldts: LASTUPDATED` is NULL in 1376/1376 rows of
-     > LND_WAREHOUSE.STOCKLEVELS — choose another load timestamp."*
-
-     Then: *"Re-run `/backbone-plan {tid}` to designate a populated load
-     timestamp."* Stop.
-   - `severity: advisory` (partially NULL) → **log and continue.** The rows
-     that carry a value still order correctly; blocking would refuse a
-     usable feed.
-   - `severity: info` (`unprofiled`, `column_absent`, `empty_table`) → do
-     **not** block. `column_absent` is step 4's error above, not this one;
-     `empty_table` is the normal state of a newly-onboarded table and says
-     nothing about the binding (#773).
+   Whether the column is **populated** is a plan-time question (B15,
+   `/backbone-plan`), not an apply one: apply queries no rows (BB-1419,
+   ADR-0053; the population check that ran here, #772, moved out).
 5. **Persist the plan's deviation block onto the ledger** (so the stamp path
    — step 6 — reads it). `save_ledger` / `write_ledger_yaml` do **not** carry
    a `metadata_overrides` key, so write it onto the canonical ledger YAML
@@ -2122,16 +2136,52 @@ namespace, not the parent's profile: item 4's presence check for `ldts` is the
 plan-contract gate's `FLATTEN_LOAD_STAMP_NOT_CARRIED` (step 2) and the 4a.1
 write's refusal by the same id — do not re-check it against the parent's
 profile, where an alias carried under a new name is absent by construction.
-`etl_runid` is not judged for it (no generator reads it over the flatten). In
-item 4b, the sweep reads the parent's profile: a load stamp carried under its
-own name is judged on the parent column (the same values); one carried under
-another alias reports `column_absent` at `info`, which is expected, not a stop.
+`etl_runid` is not judged for it (no generator reads it over the flatten).
 Item 5's persistence already happened in the 4a.1 write — do not write the
 block onto the ledger directly.
 
 Skip step 4e's persistence for any binding with no `metadata_overrides` — but
 **still run the validation** (steps 1–4) for every bound table, so a loader
 default that silently stopped landing is caught here rather than at `dbt run`.
+
+#### 4f. Bring every plan-named column into its ledger — BEFORE step 5b (BB-1419)
+
+**On hosted:** the same `backbone_amend_ledger` calls; end the stage with its
+receipt (step 0): print `commit_sha` and `push`.
+
+Once a binding has a ledger, a column the source lands later is not in it, and
+the stamp leaves it out of the body (step 6, `new_source_columns`). When the plan
+names such a column, steps 5b–5f would be refused (`unknown_ledger_column`), so
+first bring each one in. For every closed binding that is **not** flatten-fed,
+per `(source, table)`, send one
+`backbone_amend_ledger(tenant_id, source, table, entity, amendment={"add_columns":
+[…]})` listing **every column the plan names on the binding**, UPPERCASE, in
+first-mention order: `bk` (each column of a list), each `foreign_keys[].column`
+and `foreign_keys[].applies_when.column`, `dck` (not `none`), each
+`references[].column`, each `metadata:` key, and each `include_columns:` name.
+Leave out every `transforms[].as` (step 5e writes those). The amend adds a name
+the ledger lacks as a plain attribute (`columns_added`) and skips one it already
+holds (`columns_already_held`), so this is a no-op on a first-time binding (its
+ledger took every scanned column) and on a re-apply. The step-2 gate has already
+checked every named column against the scan (`column_exists`, blocking), so an
+added column is always one the table has.
+
+The loader-declared columns (the `ldts` / `etl_runid` columns, `metadata_columns`)
+need no entry: the stamp keeps them in the body whatever the ledger holds.
+
+**Removing a name from the plan never removes the column** from the ledger: a
+column leaves the vault only through the plan's `excluded_columns:` (BB-1073,
+plan format v1.19). Report no change for it.
+
+**Excluded columns (v1.19).** A column only `excluded_columns:` names is not in
+this list: step 5g adds it to a ledger that lacks it, already excluded, never as a
+`main` attribute. A column the plan names here **and** excludes (a key, or a
+`metadata:` entry; `include_columns:` and `excluded_columns:` on one column is
+refused at step 2, `excluded_column_included`) is added here as a plain attribute
+and excluded by 5g, which always runs before the stamp. The two steps give the same
+ledger in either order.
+
+Skip the step for open and flatten-fed bindings.
 
 ### 5. (removed — declared BK is now applied at bind time, #582)
 
@@ -2172,9 +2222,7 @@ ledger as SSOT.
 
 **Skip every flatten-fed binding (`source_flatten:`, #954)** — its filter
 travelled in its one 4a.1 write, and `backbone_save_ledger` must never be called
-for it: it needs the parent table's deep profile (4d did not write one for this
-binding) and writes the profile and mapping caches at the parent's grain (#954
-OQ-4, ruled C).
+for it: it refuses a flatten-fed ledger with 422 (#954 OQ-4, ruled C).
 
 For each binding `{name, tables, primary, filter, ...}` for entity
 slug `<slug>`:
@@ -2257,12 +2305,15 @@ Skip step 5b entirely when no binding declares `primary:` or
 against all of them. Write it with one `backbone_amend_ledger(tenant_id,
 source, table, entity, amendment={"columns": [...]})`: one `{name, set,
 unset}` change per column the mutation touches, `set` for each field it writes
-(`kind`, `target`, `fk_to_table`, `role`, `business_key`, `primary_key`,
-`carry`, `optional`, `applies_when`, `dependent_child_key`, `source`) and
+(`kind`, `target`, `fk_to_table`, `fk_to_column`, `role`, `business_key`,
+`primary_key`, `carry`, `optional`, `applies_when`, `dependent_child_key`,
+`source`) and
 `unset` for each it removes (a reset column's `carry`, `optional` and
 `applies_when`; a `dependent_child_key` the declaration drops). A column the
 ledger does not hold is a 422 that names it: report it verbatim and stop.
-Never save a ledger whose read came back truncated or partial. End the stage with its receipt (step 0): print `commit_sha` and `push`.
+Never save a ledger whose read came back truncated or partial. An amendment
+carries no `table_type`: on hosted the table type is set once, by `table_type` on
+the 4a assign (BB-1419). End the stage with its receipt (step 0): print `commit_sha` and `push`.
 
 For each plan entity, walk its `sources[]` once more. For every binding
 that carries a `foreign_keys:` list, translate each declared FK into a
@@ -2276,9 +2327,8 @@ the apply-side FK *inference* fallback (when the plan is silent) is
 
 **Skip every flatten-fed binding (`source_flatten:`, #954)** — its foreign keys
 and `dck:` travelled in its one 4a.1 write, and `backbone_save_ledger` must
-never be called for it: it needs the parent table's deep profile (4d did not
-write one for this binding) and writes the profile and mapping caches at the
-parent's grain (#954 OQ-4, ruled C).
+never be called for it: it refuses a flatten-fed ledger with 422 (#954 OQ-4,
+ruled C).
 
 A binding with `foreign_keys:` always carries `tables:` (schema
 validation in step 2 enforces this). One save_ledger call per `(source,
@@ -2317,7 +2367,7 @@ For each binding `{name, tables, foreign_keys, ...}` for entity slug
    so the build folds in **exactly** the declared FK set. The canonical
    algorithm is `app/utils/fk_plan_reconcile.reconcile_binding_foreign_keys`.
 
-2. **For each FK entry `{column, target, fk_to_table?, carry?}`:**
+2. **For each FK entry `{column, target, fk_to_table?, fk_to_column?, carry?}`:**
    - **Validate `target`** is a `slug:` declared in the plan. Not
      present → **HARD ERROR** (table above). Stop.
    - **Validate `column`** exists under the ledger's `columns:`
@@ -2362,6 +2412,15 @@ For each binding `{name, tables, foreign_keys, ...}` for entity slug
      **required, non-null**), `fk_to_table: <RESOLVED-or-null>`
      (uppercase table for a prejoin, or `null` for the `x` direct key),
      `role: null`, `business_key: false`, `primary_key: false`.
+   - **Copy the join column from the plan (BB-1419, ADR-0053).** On a prejoin
+     write `fk_to_column: <the plan's fk_to_column>` (uppercased) — the
+     column of `fk_to_table` the prejoin joins on. It is never resolved from a
+     profile, a primary-key guess or the relationship scan. A prejoin the plan
+     states no `fk_to_column` for (a peer-resolved one above) is written
+     `fk_to_column: null`; `save_ledger` records it
+     `fk_to_column_gap: not_stated_in_plan` and the post-5c gate refuses it
+     (rule 2). An `x` direct key carries no `fk_to_column` (clear one an
+     earlier prejoin left). (Canonical: `reconcile_binding_foreign_keys`.)
      (ADR-0008 FK contract — `relationship_key` MUST carry a non-null
      `target`; `fk_to_table` is optional.) If the column was previously
      stamped `entity_key`/`business_key` by step 4/5, clearing those is
@@ -2472,8 +2531,13 @@ For each binding `{name, tables, foreign_keys, ...}` for entity slug
        table=<TABLE>,
        entity=<slug>,
        ledger=<mutated-snapshot-from-steps-2-and-2b>,
+       table_type=<the binding's table type, step 4a>,   # BB-1419
    )
    ```
+
+   `table_type` is the top-level field, and it wins over the snapshot's own
+   (BB-1419): a uow line written as `hub` by an older assign is corrected here,
+   so its `dck:` is not refused as a DCK on a non-uow ledger.
 
    The service validates the FK contract at the write boundary
    (ADR-0008). A 422 with `LEDGER_SCHEMA_ERROR` means a mutated column
@@ -2565,6 +2629,7 @@ for entity slug `<slug>`, for the one table in `tables:`:
        table=<TABLE>,
        entity=<slug>,
        ledger=<mutated-snapshot-from-steps-2-4>,
+       table_type="unit_of_work",   # BB-1419: an attaching binding is a uow line
    )
    ```
 
@@ -2635,19 +2700,24 @@ Source Explorer save does not drop it.
 
 **Re-run the plan-contract gate after 5c (#619 5b).** Every prejoin the
 ledgers now hold — declared with `fk_to_table`, or resolved from a peer
-table above — has had its join column resolved (or not) by `save_ledger`.
+table above — carries the `fk_to_column` the plan states, or null.
 Call `GET /api/validation/tenants/{tid}/plan-contract` again: rule 2's
 ledger-backed check reports every `relationship_key` with `fk_to_table`
-set and `fk_to_column: null`, carrying the `fk_to_column_gap` the
-resolver recorded (`no_scan` / `no_relationship` / `ambiguous_relationship`
-/ `no_join_column` / `no_scan_context` / `no_target_profile` /
-`no_pk_candidate` / `incompatible_types`). `blocking > 0` → **HARD
+set and `fk_to_column: null`, carrying its `fk_to_column_gap`
+(`not_stated_in_plan` for one this run wrote; an older resolver code on a
+ledger written before BB-1419). `blocking > 0` → **HARD
 ERROR** before step 6: surface each message verbatim and redirect to
-`/backbone-plan {tid}` (re-scan, profile the target, correct
+`/backbone-plan {tid}` (state the prejoin's `fk_to_column`, correct
 `fk_to_table`, or confirm the FK is `x`-direct). A null `fk_to_column` is
 no longer allowed to reach the build silently — the generator would
 degrade it to a #671 ghost and the link `relationships` test would be
-the first thing to say so.
+the first thing to say so. The same call compares each prejoin's ledger
+value with the `fk_to_column` the plan states: a difference is the
+**advisory** `ledger_fk_to_column_matches_plan` (a ledger written before
+BB-1419, when a resolver chose the value, or edited by hand). Surface its
+`message` verbatim, repeat it in the step-9 summary, and **continue** — the
+build joins on the ledger's value; the operator confirms which column is
+right and re-plans if the plan's is.
 
 **Rule 9 — report C1–C7 verbatim (#975, ADR-0031 Amendment 5).** The same
 post-5c call judges every `carry` the ledgers now hold (the **ledger**
@@ -2662,10 +2732,11 @@ id, with what the id means and its remedy:
 | **C0** | blocking | A stated prejoin (`fk_to_table`, or a `carry`, which needs one) on an FK whose column is a `transforms[].as` of the same binding (plan), or a prejoin `relationship_key` that carries a `transform` (ledger, #1053). A prejoin joins on the raw key, identical on both sides; a transform lands on one side only (#637). Reported instead of C1. | Keep the FK `x`-direct (drop `fk_to_table` and `carry`), where the transform produces the target's business key; or land the key raw on one side so the join needs no transform — `/backbone-plan {tid}`. |
 | **C1** | blocking | A carry sits on an FK that states no `fk_to_table` (an `x` direct key, or an implicit prejoin 5c resolved), or on a column that is not a `relationship_key`. There is no join to ride, or none the gate could check. | State the parent table on the FK, or remove the carry — `/backbone-plan {tid}`. |
 | **C2** | blocking | No binding of the FK's `target` on this source binds `fk_to_table`, so the landing view the prejoin reads does not exist. | Bind `fk_to_table` to the target on this source, or correct `fk_to_table` — `/backbone-plan {tid}`. |
-| **C3** | blocking; `info` without evidence | A carried column is not a column of `fk_to_table` (its physical columns ∪ the parent binding's `transforms[].as`). `info` means the parent table has no inventory yet (no deep profile, no scan columns) — unchecked, not wrong. | Correct the column name — `/backbone-plan {tid}`. For `info`: profile the table (4d) or re-scan. |
+| **C3** | blocking; `info` without evidence | A carried column is not a column of `fk_to_table` (its physical columns ∪ the parent binding's `transforms[].as`). `info` means the parent table has no inventory yet (no scan columns) — unchecked, not wrong. | Correct the column name — `/backbone-plan {tid}`. For `info`: re-scan the source. |
 | **C4** | blocking | A carried column is loader metadata on the parent binding (its loader profile's metadata columns ∪ `metadata_overrides.metadata_columns`). A load stamp in the child's hashdiff versions every child row on every load (#958). | Remove it from `carry` — `/backbone-plan {tid}`. |
 | **C5** | blocking | A name collision the gate can see: two carries resolve to one `as:`; one parent column carried twice from one `fk_to_table` with no distinct `as:`; a self-prejoin (the default alias equals the binding's own landing alias); or an `as:` that is a SQL keyword or function name. | Give each carry a distinct, non-reserved `as:`, or carry from the parent table — `/backbone-plan {tid}`. |
 | **C6** | advisory | A carried column is the parent's own business key, which the prejoin already fetches as the key. | Surface and **continue**; suggest removing it at the next `/backbone-plan`. |
+| **C16** | blocking | A carried column is one the parent binding lists under `excluded_columns` (BB-1073; C8–C15 are consumption codes). A carry copies the column into the child's satellite, so the excluded data would come back there. The exclusion is per binding; a carry does not inherit it. | Remove it from `carry`, or from the parent binding's `excluded_columns` if it may enter a satellite — `/backbone-plan {tid}`. |
 | **C7** | advisory | The binding's ledger carries differ from its satellite's `carried` map in the frozen contract: a carry was added or removed, or its `as:` changed, since the last freeze. An incremental satellite never gains or loses a column on its own, so the carried column never reaches (or never leaves) the table. | Surface and **continue** — this is a **CHECKPOINT**, not a stop: the message names the satellite and the full refresh (#780), which re-stamps that satellite's history with the parent's **current** values. Carry it to the step-9 summary as *"full refresh needed for `<satellite>`"*. The operator decides when to run it. |
 
 Any blocking rule-9 finding → **HARD ERROR** before step 6, like rule 2.
@@ -2673,9 +2744,9 @@ Two things the gate does **not** judge, and which therefore surface only at
 the build: a default child-side alias that collides with one of the child's
 own landing aliases (the gate never recomputes a default alias — the
 generator refuses it with `CarriedColumnError`, naming both sides and the
-`as:` remedy), and a carry whose binding's `main` satellite the operator
-excluded in the Source Explorer (the stamp refuses it with 422
-`CarryHasNoSatelliteError`, naming the binding). C7 is not computed when
+`as:` remedy). (A Source Explorer exclusion of the binding's `main`
+satellite no longer reaches the stamp: it lived only in the mapping cache,
+which apply never reads — BB-1419.) C7 is not computed when
 no vault contract has been frozen (a first build) — nothing is built to
 refresh.
 
@@ -2698,14 +2769,12 @@ to perform here any more.
 
 **How it now happens (no action required in this step):**
 
-1. **Population (auto-configure).** When the line binding's ledger is
-   written, `auto_configure_service` resolves each prejoin FK's
-   referenced join column (the target's PK) via
-   `relationship_scan_resolver.resolve_fk_join` (happy `ID` path) and
-   persists it on the **line-side** `relationship_key` ledger entry as
-   `fk_to_column` (alongside `target` + `fk_to_table`). The join is
-   declared **once**, on the line ledger. A scan miss writes a null
-   `fk_to_column` (a coverage [gap], never guessed).
+1. **Population (step 5c).** The plan states each prejoin's join column
+   (`fk_to_column`, v1.18), rule 2 judges it, and 5c copies it onto the
+   **line-side** `relationship_key` ledger entry (alongside `target` +
+   `fk_to_table`, BB-1419). The join is declared **once**, on the line
+   ledger. A prejoin the plan states none for is written null with gap
+   `not_stated_in_plan` (never guessed), and the post-5c gate refuses it.
 
 2. **Synthesis (step 6 `stamp_body_config`).** When the **referenced**
    table's body is stamped, a post-pass reads the sibling line ledgers,
@@ -2834,6 +2903,114 @@ Skip step 5e entirely when no binding declares `transforms:`.
 > Slice 1 spine). 5e only writes the ledger; the body derivation follows
 > automatically, like every other ledger field.
 
+### 5f. Apply stated amount / date tags and included columns via `backbone_amend_ledger` (BB-1419)
+
+**On hosted:** the same `backbone_amend_ledger` calls; end the stage with its
+receipt (step 0): print `commit_sha` and `push`.
+
+Two binding keys (plan format v1.18) state column decisions the profile and
+mapping caches used to make. Apply never reads a cache or profiles a table to
+make them; it compiles what the plan states. The step-2 gate has already judged
+both (`stated_column_shape`, and rule 1 `column_exists` for every named column).
+
+- **`metadata: {COLUMN: amt | dt | none}`** is the column's amount / date tag:
+  it suffixes the built column (`…_amt` / `…_dt`). `none` states no tag where
+  the stamp's name and type rule would give one. Compile the binding's **whole**
+  `metadata:` mapping onto its ledger, replace-by-scope: for **every** closed
+  binding that is not flatten-fed, per `(source, table)`, send
+  `backbone_amend_ledger(tenant_id, source, table, entity,
+  amendment={"stated_metadata": {<the binding's metadata: mapping, or {} when it
+  has none>}})`. Each named column's tag is set and every other column's tag is
+  removed, so an entry deleted from the plan leaves the ledger too. Every named
+  column is already in the ledger (step 4f). For a flatten-fed binding
+  (`source_flatten:`), whose ledger only the flatten binding `PUT` writes (4a.1),
+  send `metadata` on each named alias's entry in that `PUT`'s `columns`, and none
+  on the others. A ledger column with no `metadata` takes the stamp's name and type
+  rule; a stated tag never replaces a key's `bk` or `rk`, nor a loader-declared
+  timestamp's `tk` (the gate's `stated_tag_on_key` advisory names such an entry).
+- **`include_columns: [COLUMN]`** was compiled at step 4f: the column is in the
+  ledger, so the stamp takes it.
+
+Column names match the ledger's in any case. Re-applying the same plan is a
+no-op.
+
+### 5g. Apply declared `excluded_columns` (BB-1073)
+
+**On hosted:** read each ledger's columns with every page of `backbone_get_ledger`
+(step 0, wide ledgers), work out the mutation below against all of them, and write
+it with one `backbone_amend_ledger(tenant_id, source, table, entity,
+amendment={"columns": [...]})`: one `{name, set: {"target": "__excluded__"}}` per
+excluded attribute, one `{name, set: {"excluded": true}}` per excluded key column, one
+`{name, set: {"target": "main"}}` per released attribute and one `{name, unset:
+["excluded"]}` per released key column. When the mutation reports `added`
+columns, send each under the same amend's `add_columns` as well (BB-1419): the
+amend adds it first, as a plain attribute, and the `{name, set: {"target":
+"__excluded__", "source": "excluded_columns"}}` change in the same call (`"source":
+"plan"` instead when the column is one of the binding's plan-named columns) excludes
+it before anything is written. An amend cannot remove a column, so when the mutation
+reports `dropped` columns, save the whole ledger instead with `backbone_save_ledger`,
+built from every page of the read and the mutated columns.
+Never save a ledger whose read came back truncated or partial. End the stage with
+its receipt (step 0): print `commit_sha` and `push`.
+
+Run it **after 5f** (so after 5e) and before step 6, for **every** closed binding
+that is not flatten-fed, whether it declares `excluded_columns` or not: the ledger
+is apply's compiled copy of the plan (ADR-0053), so this step re-derives every
+exclusion from the plan on each apply. Assign (4a) rewrites a ledger with each
+attribute in `main`, 4f adds a plan-named column the ledger lacks as a plain
+`main` attribute, and 5c's reset of undeclared foreign keys writes `target: main`
+too; this step runs after all three and before the stamp, so no excluded column
+reaches a body as a satellite attribute, and a re-apply keeps what the plan lists.
+5f's stated tags are kept: an excluded column keeps its `metadata` (the gate's
+`excluded_column_stated_metadata` advisory names such an entry), so a later release
+brings it back with the tag the plan states.
+
+For each binding `{name, tables, excluded_columns?}` for entity slug `<slug>`, for
+each table `<TABLE>` in `tables:`:
+
+1. **Read the current ledger snapshot** at
+   `{estate root}/<tid>/configs/ledgers/<NAME>__<TABLE>__<slug>.yaml` (post-5e).
+2. **Mutate its `columns`** with
+   `app/utils/excluded_columns.apply_plan_exclusions_to_ledger_columns(columns,
+   <the binding's excluded_columns, or []>, addable=<scan columns + transforms[].as>,
+   named=<app/utils/plan_named_columns.plan_named_columns(binding)>)`:
+   - a listed **attribute** column gets `target: __excluded__`: it goes into no
+     satellite grouping, so the stamp gives it no `hd_*` marker and marks its body
+     entry `excluded: true`;
+   - a listed **key** column (a business key, a foreign key's source, a dck:
+     `kind: entity_key` or `relationship_key`, or `business_key: true`) keeps its
+     kind and its `target` (the entity it keys, ADR-0008), gets `excluded: true`
+     and is reported `kept_as_keys`. The key column still feeds the hash key; the
+     stamp marks its body entry `excluded: true` and the satellite payload drops its
+     business-key copy, so the business vault loses `bk__<col>` for that binding.
+     Excluding a key removes only its satellite copies: the hub keeps the value in
+     plain text (its business keys), and so does the staging view. Withholding a
+     personal-data key from consumption is BB-1075, not this step;
+   - a column carrying `target: __excluded__` that the plan does **not** list is
+     **released** to `target: main`, and a key column's `excluded` it does not
+     list is removed. The exception: a column this step added only to exclude it
+     (`source: excluded_columns`) that the plan names nowhere else (not in
+     `named`) never was in a satellite, so it is **dropped** from the ledger and
+     reported `dropped`; the stamp then reports it as `new_source_columns`
+     (BB-1419: a new source column enters only when the plan states it);
+   - a listed column a sparse ledger does not hold (Bug #591: it may cover only
+     the key columns) is **added** as `{kind: attribute, target: __excluded__}`
+     when it is one of the table's scan columns or the binding's
+     `transforms[].as` — pass them as `addable=` — and reported `added`. Its
+     `source` is `plan` when it is in `named` (as 4f would add it), else
+     `excluded_columns`;
+   - a listed column that is none of these is reported `missing` → **HARD
+     ERROR** (table above). Stop.
+3. **Write it only when it changed** (`result.changed`): `backbone_save_ledger(
+   tenant_id=<tid>, source=<NAME>, table=<TABLE>, entity=<slug>,
+   ledger=<snapshot with the mutated columns>)`. A binding that excludes nothing
+   and carries no sentinel changes nothing and writes nothing.
+4. **Idempotent.** Re-running on its own output changes nothing.
+
+A flatten-fed binding never reaches this step: the gate refuses `excluded_columns`
+on it (`excluded_columns_binding`); leave the column out of the flatten
+declaration's `carry:`.
+
 ### 6. Stamp body YAMLs
 
 **On hosted:** the same `backbone_stamp_body_config` calls. A 422
@@ -2879,6 +3056,16 @@ expected, and it never means a ledger value was dropped. The stamp writes the
 step-4e `metadata_overrides` fields onto an input it keeps, and refuses (422
 `metadata_overrides_not_written`) rather than answer `stamped: true` when one
 did not land.
+
+**New source columns (BB-1419).** The ledger is the plan's compiled copy, so a
+binding that already has a ledger takes only the columns the ledger holds: a
+column the source scan finds that the ledger does not name is left out of the
+body (it never joins a satellite by itself), and the stamp names it in
+`new_source_columns`. A first-time binding's ledger is written from every
+scanned column, so it reports none. Collect every non-empty `new_source_columns`
+per `(source, table, entity)` for the step-9 report. It is never an error and
+never a reason to stop: the plan decides at the next `/backbone-plan` whether
+each column joins (`include_columns:`) or stays out.
 
 If any stamp call errors, surface verbatim and stop. Body synthesis is
 a hard build prerequisite — past a failed stamp the start-build call
@@ -3044,6 +3231,15 @@ When `status` is `completed`, tell the user:
 > generated but not yet materialised in Snowflake. Run `/backbone-run <tid>`
 > to execute it against Snowflake.
 
+**New source columns (BB-1419).** When any step-6 stamp returned a non-empty
+`new_source_columns`, add one line per binding after the build line:
+
+> **New source columns on `<source>.<table>` → `<entity>`:** `<COL>`, … — the
+> source has them, the plan does not. They are not in the vault. Re-run
+> `/backbone-plan <tid>` to add each with `include_columns:`, or leave it out.
+
+With none, add nothing.
+
 **Link columns that need a schema step (#1136 LK1 / LK2).** When the post-5c
 gate returned any rule-10 finding, the summary MUST add one line per link and
 key, after the build line and before the hand-off:
@@ -3132,6 +3328,42 @@ chooses when to refresh. Never run the refresh yourself, and never drop the
 line because the build is green — the green build is exactly the case in
 which the missing column goes unnoticed. With no C7, add nothing.
 
+**Satellites that lose an excluded column (BB-1073).** When the step-2 gate
+returned any `excluded_column_leaves_satellite`, the summary MUST add one line per
+finding, after the build line and before the hand-off:
+
+> **Full refresh needed for the satellite carrying `<column>`** (`<source>.<table>`,
+> `<entity>`) — the plan now excludes `<column>`, so the satellite's hashdiff
+> changes and an incremental run would write a new version of every key. Run it
+> with a full refresh (#780). Where the landing keeps only current rows, the refresh
+> rebuilds every key from its current landed row and the satellite loses all its
+> earlier versions, not only the column's.
+
+When the step-2 gate returned any `excluded_column_enters_satellite`, the summary
+MUST also add one line per finding:
+
+> **Full refresh needed: `<column>` comes back into the satellite** (`<source>.<table>`,
+> `<entity>`) — the ledger kept it out of every satellite and the plan does not list
+> it, so apply released it. The satellite's hashdiff changes; run it with a full
+> refresh (#780). This brings back data someone chose to keep out: add `<column>` to
+> the binding's `excluded_columns` if it should stay out.
+
+A **key** column has its own line for each (shapes `excluded_key_leaves_satellite`
+and `excluded_key_enters_satellite`), because its hashdiff does not change but the
+satellite's column set does:
+
+> **Full refresh needed: the key `<column>`'s business-key copy leaves the
+> satellite** (`<source>.<table>`, `<entity>`) — the hashdiff is unchanged, but the
+> column set changes; the generated test fails until the refresh, and the business
+> vault loses `bk__<col>` for this binding.
+
+> **Full refresh needed: the key `<column>`'s business-key copy comes back**
+> (`<source>.<table>`, `<entity>`) — with no history for earlier rows; add it to
+> `excluded_columns` if it should stay out.
+
+A checkpoint, not a failure. Never run the refresh yourself, and never drop the
+line because the build is green. With no such finding, add nothing.
+
 **Flatten declarations the plan does not list (#954).** When step 3d found a
 declaration on disk that no `flattens:` entry names, add one line per
 declaration: *"`<SOURCE>__<TABLE>__<ARRAY_COLUMN>` is declared but not in the
@@ -3146,19 +3378,17 @@ successful build. The Snowflake-write step requires a human checkpoint.
 ### 10. Feed apply-time findings back into the plan (ON SUCCESS ONLY)
 
 **On hosted:** read the plan with `backbone_get_design_plan(tenant_id)`. Item
-2's promotions are written with `backbone_put_design_plan(tenant_id, text,
-expected_sha256)`, passing the `sha256` just read (`plan_changed` means it
-moved: read it again and redo item 2), and item 3's section with
-`backbone_record_plan_findings(tenant_id, outcome, findings)`, which replaces
-any earlier findings section and never touches `## Plan`. Items 6 to 8 print one
+3's section is written with `backbone_record_plan_findings(tenant_id, outcome,
+findings)`, which replaces any earlier findings section and never touches
+`## Plan`. Items 6 to 8 print one
 line, `skipped: learning loop runs on a local estate`: they write `proposed/`
 and `LEDGER_EXAMPLES.md` in the plugin's own repository, which a hosted install
 does not have. End the stage with its receipt (step 0): print `commit_sha` and `push`.
 
 The plan is the contract, but **apply legitimately discovers and resolves
 things the plan could not have known** — an absent loader-default column,
-the prejoin-vs-`x` resolution of a declared FK, a `fk_to_column` the
-relationship scan resolved, a `#556`-inferred BK on a `uow` line. Today
+the prejoin-vs-`x` resolution of a declared FK, a `#556`-inferred BK on a
+`uow` line. Today
 those resolutions live only on the materialised ledgers; the **next fresh
 `/backbone-apply` (e.g. after `demo_reset`) re-discovers them from
 scratch, and any that needed a human-confirmed deviation are lost.** This
@@ -3168,21 +3398,28 @@ time. Skip this step entirely on `error` / `warning` / a hard-error stop
 — a half-applied plan must not pollute the contract.
 
 This preserves the ADR-0001 authoring/execution split: apply does **not
-invent new plan semantics**. It records *what it already did* (mechanical,
-deterministic) and *what it could not resolve* (judgment, for the human),
-in a clearly-delimited block the user reviews.
+invent new plan semantics**. It records *what it already did* and *what it
+could not resolve*, in a clearly-delimited block the user reviews.
+
+**Apply never changes the `## Plan` block** (ADR-0049 decision 7, ADR-0053,
+BB-1354). Only `/backbone-plan` writes it, through `PUT design-plan`, which
+writes the plan record. A value apply decided (a peer-resolved
+`fk_to_table`, a #556-inferred key, a resolved loader-metadata column) is
+reported in `## Apply-time findings` for the next `/backbone-plan` to
+decide; it is never written into `## Plan`, where it would mint a plan record for
+a value no plan check judged.
 
 1. **Collect the deltas** — only items where the **applied ledger state
    differs from what the plan's `## Plan` YAML literally declared**:
    - **Resolved loader-metadata (4e).** Any `metadata_overrides` block the
      executor wrote directly onto a ledger to cover an absent loader-default
      `ldts` / `etl_runid` (a designated real column, or a reason-stamped
-     `current_timestamp`). **Mechanical.**
+     `current_timestamp`). **A finding for the next re-plan.**
    - **FK resolution (5c).** Any FK whose `fk_to_table` the executor
      resolved (a co-located-peer **prejoin** promoted from a silent
      declaration, or an over-prejoin **corrected to `x` direct** because the
-     column value *is* the target BK per ADR-0008), plus any prejoin
-     `fk_to_column` the scan resolved. **Mechanical.**
+     column value *is* the target BK per ADR-0008). **A finding for the
+     next re-plan.**
    - **Coverage gaps / judgment.** A prejoin that resolved
      `fk_to_column: null` (unresolved join); a `#556`-inferred BK left on a
      `uow` line; a bare `hub_<role>` in the build *alongside* the
@@ -3192,16 +3429,18 @@ in a clearly-delimited block the user reviews.
      only from a hand-edited ledger); any hub with no BK source.
      **Judgment — never auto-promoted.**
 
-2. **Promote the mechanical resolutions into `## Plan`.** For each
-   loader-metadata and `fk_to_table`/`fk_to_column` delta, update the
-   matching binding's YAML in `design_plan.md` so a literal re-apply
-   reproduces it: add/replace the binding's `metadata_overrides:` block;
-   set the FK's `fk_to_table:` (or remove it for an `x`-direct correction).
-   These are the executor reproducing its own deterministic output — not new
-   intent. Bump the plan's `_Last updated_` line with an `(apply-fed)` note.
+2. **Nothing is promoted into `## Plan`** (BB-1354). The deltas above that
+   earlier versions of this step wrote into the plan's YAML (a resolved
+   `metadata_overrides`, `fk_to_table`, `fk_to_column`) are findings in item 3,
+   each with its `re_plan_hint`, so the next `/backbone-plan` states them and
+   checks them. Do not call `backbone_put_design_plan` (or `PUT design-plan`)
+   from apply.
 
-3. **Append the judgment findings as prose**, never into the YAML. Write a
-   single delimited section under the brief:
+3. **Append every finding as prose**, never into the YAML. Write a
+   single delimited section under the brief, with
+   `POST /api/tenants/{tid}/design-plan/findings` (hosted:
+   `backbone_record_plan_findings`), which never touches `## Plan` and leaves
+   the plan fingerprint and its record unchanged:
 
    ```markdown
    ## Apply-time findings (<YYYY-MM-DD>, build <build_id>)
@@ -3215,23 +3454,20 @@ in a clearly-delimited block the user reviews.
    any `## Apply-time findings*` section (match on the heading **prefix**
    `## Apply-time findings`, not the exact success heading — so a prior
    *failed-run* section written by the #554 verdict layer, #658, is replaced by
-   this success write too) and re-promote in place — never append duplicates.
+   this success write too) — never append duplicates.
    A run with no deltas writes nothing.
 
 5. **Report every baked-back change explicitly (REQUIRED — never bake in
    silently).** End the run with an itemised list the user can audit:
-   - For each **mechanical** item promoted into `## Plan`, name the binding
-     and the exact field written — e.g.
+   - For each item in `## Apply-time findings`, name the binding and the
+     value apply resolved — e.g.
      `LND_WAREHOUSE.ORDER_LINE → metadata_overrides.ldts: LASTUPDATED`,
-     `ECOMMERCE.ORDER_LINE.ORDER_ID → fk_to_table: ORDER`.
-   - For each **judgment** item left in `## Apply-time findings`, name it and
-     point at `/backbone-plan`.
-   The user MUST be able to see precisely what apply wrote back into the
-   contract versus what is left for them to decide. The promoted mechanical
-   items mean the next fresh apply "just works"; the judgment items are the
-   genuine re-plan backlog. If a deviation cannot be expressed in the plan
+     `ECOMMERCE.ORDER_LINE.ORDER_ID → fk_to_table: ORDER` — and point at
+     `/backbone-plan`, which states it in the plan.
+   The user MUST be able to see precisely what apply resolved, and that the
+   plan itself is unchanged. If a deviation cannot be expressed in the plan
    schema (e.g. pinning `x`-direct where a co-located peer exists), say so
-   explicitly — it is a judgment item, not a silent omission.
+   explicitly — it is a finding, not a silent omission.
 
 6. **Learn novel ledger shapes into the registry (`#653b`, detect + stage only).**
    After the mechanical/judgment write-back, fingerprint the ledgers this apply
@@ -3351,10 +3587,9 @@ in a clearly-delimited block the user reviews.
   This skill consumes it. The plan is the contract — neither skill
   reaches into the other **during a run**. The one sanctioned
   cross-write is **step 10** (on a *successful* build): apply feeds its
-  real findings back into `design_plan.md` (mechanical resolutions
-  promoted into `## Plan`; judgment items appended as
-  `## Apply-time findings`) so the next fresh apply reproduces the
-  working config and the human re-plan backlog is explicit. This is
+  real findings back into `design_plan.md` as `## Apply-time findings`
+  only — it never changes the `## Plan` block (BB-1354) — so the human
+  re-plan backlog is explicit and the next `/backbone-plan` states them. This is
   apply reporting what it did/learned, not authoring new intent — the
   ADR-0001 split holds.
 - `#552` shipped the ledger-as-SSOT lift. Step 5b uses

@@ -1206,7 +1206,7 @@ code guarded it at write time. Rules (pure module
       reads the keyword. For a carried column the message says to add `as:` to
       the carry in the design plan; otherwise the remedy is #955.
 
-  (Rule-id note: this read-site **C8** is not the design-plan gate's C1–C7 —
+  (Rule-id note: this read-site **C8** is not the design-plan gate's C0–C7 or C16 —
   those judge `carry` declarations at `/backbone-apply`'s vault half — nor
   `compile-consumption-plan`'s dialogue behaviour C8.)
 - **C9 — an attached satellite is attached to this source's owner (kanban

@@ -598,7 +598,8 @@ deliberate (ADR-0001) — the operator supplies the brief to `plan` themselves.
   (compile-design-plan). Onboard produces the *scan*, not the *plan*.
 - **No per-table loader correctness** — onboard ensures a loader block
   **exists**; per-table `ldts`/`smdt` deviation resolution is plan step 4.7.
-- **No deep first-entry profiling** — that is `/backbone-apply` step 4d.
+- **No deep first-entry profiling** — and no later stage needs one: apply
+  compiles from the plan and the scan (BB-1419, ADR-0053).
 - **No secret handling** — connect is a browser hand-off (local) or the operator's
   own command (hosted); the key and passphrase never enter the transcript.
 - **No loader authoring on hosted** — an unknown loader is "ask Calon".

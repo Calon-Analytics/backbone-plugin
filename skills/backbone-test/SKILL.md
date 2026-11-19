@@ -49,8 +49,7 @@ test definitions themselves. Re-running it is always safe.
 This skill calls the **existing** REST endpoint
 `POST /api/vault/quality/{tid}/test`, exactly as `apply-design-plan`
 calls REST endpoints directly for steps with no dedicated MCP tool
-(`profile-table-cached` in 4d, `create_repository` / `rebuild-active`
-in 6b). That endpoint wraps the backend's `dbt test` execution and
+(`create_repository` / `rebuild-active` in 6b). That endpoint wraps the backend's `dbt test` execution and
 returns the severity-split fields this skill reports
 (`tests_failed` = error-severity / blocking, `tests_warned` =
 warn-severity / advisory, `success` = the exit-code gate).
